@@ -1,0 +1,58 @@
+version: "3.8"
+
+services:
+  # ============================================================================
+  # PharmaPredict Industrial Edge Gateway Daemon
+  # ============================================================================
+  edge-gateway:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    container_name: pharmapredict-edge-gateway
+    restart: unless-stopped
+    read_only: false
+    user: "10001:10001"
+    environment:
+      - GATEWAY_ID=gw-edge-packaging-01
+      - ORGANIZATION_ID=${ORGANIZATION_ID:-org-default}
+      - EQUIPMENT_ID=${EQUIPMENT_ID:-mach-blister-01}
+      - OPCUA_ENDPOINT_URL=${OPCUA_ENDPOINT_URL:-opc.tcp://opcua-simulator:48401/pharmapredict/server/}
+      - OPCUA_SECURITY_POLICY=None
+      - OPCUA_SECURITY_MODE=None
+      - OPCUA_AUTH_TYPE=Anonymous
+      - CLOUD_INGESTION_URL=${CLOUD_INGESTION_URL:-https://wed-thousands-kelkoo-centuries.trycloudflare.com/api/v1/internal/ingestion/readings}
+      - GATEWAY_INTERNAL_SECRET=${GATEWAY_INTERNAL_SECRET:?Mandatory secret required}
+      - BUFFER_DIR=/opt/edge-gateway/data/gateway_buffer
+      - MAX_QUEUE_SIZE=5000
+      - MAX_DISK_BUFFER_BYTES=52428800
+      - BATCH_SIZE=50
+      - FLUSH_INTERVAL_SEC=1.0
+      - VERIFY_SSL=true
+      - LOG_LEVEL=INFO
+    volumes:
+      # Persistent storage volume ensuring disk buffer survives container restarts
+      - gateway_buffer_data:/opt/edge-gateway/data/gateway_buffer
+    networks:
+      - ot_network
+
+  # ============================================================================
+  # Optional Local Staging OPC UA Simulator (For Edge Testing Only)
+  # ============================================================================
+  opcua-simulator:
+    image: python:3.12-slim
+    container_name: pharmapredict-opcua-simulator
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ..:/app
+    command: python -c "import asyncio; from app.modules.connectivity.simulator import PharmaOPCUASimulator; sim = PharmaOPCUASimulator(port=48401); asyncio.run(sim.start()); asyncio.get_event_loop().run_forever()"
+    networks:
+      - ot_network
+
+volumes:
+  gateway_buffer_data:
+    driver: local
+
+networks:
+  ot_network:
+    driver: bridge

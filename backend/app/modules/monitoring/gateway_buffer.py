@@ -44,6 +44,10 @@ class BoundedGatewayBuffer:
         # Ensure disk buffer directory exists
         try:
             self.disk_buffer_dir.mkdir(parents=True, exist_ok=True)
+            overflow_file = self.disk_buffer_dir / "gateway_overflow.jsonl"
+            if overflow_file.exists():
+                with open(overflow_file, "r", encoding="utf-8") as f:
+                    self._buffered_disk_count = sum(1 for line in f if line.strip())
         except Exception as e:
             logger.warning(f"Failed to create disk buffer directory {self.disk_buffer_dir}: {e}")
 
