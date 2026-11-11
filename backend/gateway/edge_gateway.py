@@ -348,7 +348,10 @@ class EdgeGateway:
         except Exception as e:
             logger.warning(f"[EdgeGateway] Initial OPC UA connection failed: {e}. Reconnection loop active.")
 
-        # 4. Launch background reconnection and heartbeat tasks
+        # 4. Write initial health state for Docker healthcheck
+        self._write_health_state()
+
+        # 5. Launch background reconnection and heartbeat tasks
         self._tasks.append(asyncio.create_task(self._reconnection_loop()))
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
         
@@ -362,6 +365,7 @@ class EdgeGateway:
         logger.info(f"[EdgeGateway] Shutting down gateway {self.config.gateway_id} gracefully...")
         self._is_running = False
         self._shutdown_event.set()
+        self._write_health_state()
 
         # Cancel background tasks
         for task in self._tasks:
@@ -408,19 +412,31 @@ class EdgeGateway:
                 logger.error(f"[EdgeGateway] Error in reconnection loop: {e}")
 
     async def _heartbeat_loop(self) -> None:
-        """Periodic heartbeat and buffer metrics check."""
+        """Periodic heartbeat and health state persistence (Fix 5)."""
+        interval = min(5.0, self.config.heartbeat_interval_sec)
         while self._is_running:
             try:
-                await asyncio.sleep(self.config.heartbeat_interval_sec)
-                metrics = self.get_metrics()
-                logger.debug(f"[EdgeGateway Heartbeat] Metrics: {metrics}")
+                self._write_health_state()
+                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"[EdgeGateway] Error in heartbeat loop: {e}")
 
+    def _write_health_state(self) -> None:
+        """Persist real-time gateway health and metrics for the container healthcheck probe."""
+        try:
+            health_file = Path(self.config.buffer_dir) / ".gateway_health.json"
+            metrics = self.get_metrics()
+            metrics["timestamp"] = datetime.now(timezone.utc).isoformat()
+            metrics["timestamp_epoch"] = time.time()
+            with open(health_file, "w", encoding="utf-8") as f:
+                json.dump(metrics, f)
+        except Exception as e:
+            logger.debug(f"[EdgeGateway] Failed to write health state: {e}")
+
     def get_metrics(self) -> Dict[str, Any]:
-        """Return comprehensive operational and security metrics."""
+        """Return comprehensive operational, disk utilization, and security metrics (Fix 4)."""
         buf_metrics = self.buffer.get_metrics()
         return {
             "gateway_id": self.config.gateway_id,
@@ -430,8 +446,16 @@ class EdgeGateway:
             "opcua_state": self.opcua_client.get_state().value if self.opcua_client else "DISCONNECTED",
             "opcua_connected": self.opcua_client.is_connected() if self.opcua_client else False,
             "queue_depth": buf_metrics.get("queue_depth", 0),
+            "max_queue_size": buf_metrics.get("max_queue_size", self.config.max_queue_size),
             "buffered_disk_readings": buf_metrics.get("buffered_readings", 0),
+            "disk_usage_bytes": buf_metrics.get("disk_usage_bytes", 0),
+            "max_disk_buffer_bytes": buf_metrics.get("max_disk_buffer_bytes", self.config.max_disk_buffer_bytes),
+            "disk_utilization_pct": buf_metrics.get("disk_utilization_pct", 0.0),
             "dropped_readings": buf_metrics.get("dropped_readings", 0),
+            "dropped_first_timestamp": buf_metrics.get("dropped_first_timestamp"),
+            "dropped_last_timestamp": buf_metrics.get("dropped_last_timestamp"),
+            "overflow_active": buf_metrics.get("overflow_active", False),
+            "overflow_policy": buf_metrics.get("overflow_policy", "BOUNDED_DROP_ON_CAPACITY_EXCEEDED"),
             "delivered_batches": self._delivered_batches,
             "delivered_readings": self._delivered_readings,
             "failed_deliveries": self._failed_deliveries,

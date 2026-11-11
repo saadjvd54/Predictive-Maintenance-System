@@ -43,8 +43,9 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/opt/edge-gateway \
     BUFFER_DIR=/opt/edge-gateway/data/gateway_buffer
 
-# Healthcheck to verify gateway process status
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import sys, os; sys.exit(0 if os.path.isdir('/opt/edge-gateway/data/gateway_buffer') else 1)"
+# Healthcheck to verify gateway event loop responsiveness and health state
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python", "gateway/healthcheck.py"]
 
 CMD ["python", "gateway/edge_gateway.py"]
+

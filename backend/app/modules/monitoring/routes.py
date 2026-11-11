@@ -9,6 +9,7 @@ from app.models.equipment import Machine
 from app.security import login_required, roles_required
 from app.modules.monitoring.lifecycle import MonitoringLifecycleManager
 from app.modules.monitoring.ingestion_service import IngestionService
+from app.modules.monitoring.gateway_auth import GatewayAuthRegistry, GatewayIdentity
 from app.models.monitoring import GatewayHealthRecord
 
 logger = logging.getLogger(__name__)
@@ -21,22 +22,33 @@ GATEWAY_SECRET = os.getenv("GATEWAY_INTERNAL_SECRET", "pharma-predict-internal-g
 
 
 def internal_gateway_required(f):
-    """Ensure request comes from an authenticated internal edge gateway service (Requirement 8)."""
+    """Ensure request comes from an independently authenticated industrial edge gateway (Fix 1).
+    
+    Uses constant-time comparison (hmac.compare_digest) and binds gateway identity to g.authenticated_gateway.
+    """
     @wraps(f)
     def decorated(*args, **kwargs):
         auth_key = request.headers.get("X-Gateway-Secret") or request.headers.get("X-Service-Token")
         # Also allow valid internal Bearer token
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
-            if token == GATEWAY_SECRET:
-                auth_key = token
+            auth_key = auth_header[7:].strip()
 
-        if not auth_key or auth_key != GATEWAY_SECRET:
+        if not auth_key:
             return jsonify({
                 "error": "Forbidden",
-                "message": "Access denied: valid internal gateway credentials required.",
+                "message": "Access denied: gateway authentication credentials required.",
             }), 403
+
+        # Authenticate via server-side GatewayAuthRegistry using constant-time comparison
+        gateway = GatewayAuthRegistry.authenticate_by_secret(auth_key)
+        if not gateway or not gateway.is_active():
+            return jsonify({
+                "error": "Forbidden",
+                "message": "Access denied: invalid or revoked gateway credentials.",
+            }), 403
+
+        g.authenticated_gateway = gateway
         return f(*args, **kwargs)
     return decorated
 
@@ -209,20 +221,36 @@ def get_gateway_health(gateway_id: str):
 @monitoring_bp.route("/internal/ingestion/readings", methods=["POST"])
 @internal_gateway_required
 def internal_ingest_readings():
-    """Secure internal service endpoint for edge gateways to push telemetry batches."""
+    """Secure internal service endpoint for edge gateways to push telemetry batches (Fix 1)."""
     payload = request.get_json(silent=True) or {}
     readings = payload.get("readings", [])
-    gateway_id = payload.get("gateway_id", "gw-default")
+    declared_gateway_id = payload.get("gateway_id")
     batch_id = payload.get("batch_identifier")
+
+    # Verify declared gateway_id matches the authenticated gateway identity (Requirement 2 & 6)
+    auth_gateway = getattr(g, "authenticated_gateway", None)
+    if not auth_gateway:
+        return jsonify({"error": "Forbidden", "message": "Access denied: unauthenticated gateway."}), 403
+
+    if declared_gateway_id and declared_gateway_id != auth_gateway.gateway_id:
+        logger.warning(
+            f"[Security Alert] Gateway spoofing attempt: declared '{declared_gateway_id}', "
+            f"authenticated as '{auth_gateway.gateway_id}'"
+        )
+        return jsonify({
+            "error": "Forbidden",
+            "message": "Access denied: gateway identity mismatch.",
+        }), 403
 
     if not isinstance(readings, list) or not readings:
         return jsonify({"error": "Validation Error", "message": "Field 'readings' must be a non-empty array."}), 400
 
     try:
         result = IngestionService.ingest_batch(
-            gateway_id=gateway_id,
+            gateway_id=auth_gateway.gateway_id,
             readings_data=readings,
             batch_identifier=batch_id,
+            authenticated_gateway=auth_gateway,
         )
         return jsonify({
             "message": "Batch ingested successfully.",

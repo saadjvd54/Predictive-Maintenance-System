@@ -26,32 +26,46 @@ class IngestionService:
         gateway_id: str,
         readings_data: List[Dict[str, Any]],
         batch_identifier: Optional[str] = None,
+        authenticated_gateway: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Ingest a batch of normalized readings idempotently."""
+        """Ingest a batch of normalized readings idempotently with atomic conflict handling and strict authorization (Fix 1 & Fix 2)."""
+        import uuid
         batch_id = batch_identifier or f"batch-{datetime.now(timezone.utc).timestamp()}"
 
         accepted = 0
         rejected = 0
         duplicates = 0
 
-        # Pre-query existing event_ids in this batch for fast deduplication
-        event_ids = [r.get("event_id") for r in readings_data if r.get("event_id")]
-        existing_event_ids = set()
-        if event_ids:
-            found = db.session.query(SignalReading.event_id).filter(SignalReading.event_id.in_(event_ids)).all()
-            existing_event_ids = {f[0] for f in found}
-
-        readings_to_add: List[SignalReading] = []
+        records_to_insert: List[Dict[str, Any]] = []
 
         for item in readings_data:
             eid = item.get("event_id")
-            if not eid:
+            org_id = item.get("organization_id")
+            mach_id = item.get("machine_id")
+            sig_id = item.get("signal_id")
+
+            if not eid or not org_id or not mach_id or not sig_id:
                 rejected += 1
                 continue
 
-            if eid in existing_event_ids:
-                duplicates += 1
-                continue
+            # Strict Gateway Authorization Check (Fix 1)
+            if authenticated_gateway:
+                if not authenticated_gateway.is_authorized_for(org_id, mach_id):
+                    logger.warning(
+                        f"[GatewayAuth] Unauthorized reading rejected: gateway '{authenticated_gateway.gateway_id}' "
+                        f"is not authorized for organization '{org_id}', machine '{mach_id}'"
+                    )
+                    rejected += 1
+                    continue
+
+                # Verify target machine exists in the database and belongs to the authorized organization
+                target_machine = db.session.get(Machine, mach_id)
+                if not target_machine or target_machine.organization_id != org_id:
+                    logger.warning(
+                        f"[IngestionService] Target machine '{mach_id}' not found or does not belong to org '{org_id}'"
+                    )
+                    rejected += 1
+                    continue
 
             try:
                 # Parse timestamps
@@ -73,48 +87,75 @@ class IngestionService:
                     gw_raw = item["gateway_received_at"]
                     gw_ts = datetime.fromisoformat(gw_raw.replace("Z", "+00:00")) if isinstance(gw_raw, str) else gw_raw
 
-                reading = SignalReading(
-                    event_id=eid,
-                    organization_id=item["organization_id"],
-                    machine_id=item["machine_id"],
-                    signal_id=item["signal_id"],
-                    connector_id=item.get("connector_id"),
-                    gateway_id=gateway_id,
-                    mapping_version=int(item.get("mapping_version", 1)),
-                    source_timestamp=src_ts,
-                    server_timestamp=srv_ts,
-                    gateway_received_at=gw_ts,
-                    source_value=str(item.get("source_value")) if item.get("source_value") is not None else None,
-                    normalized_value=float(item["normalized_value"]) if item.get("normalized_value") is not None else None,
-                    raw_value_numeric=float(item["raw_value_numeric"]) if item.get("raw_value_numeric") is not None else None,
-                    raw_value_boolean=bool(item["raw_value_boolean"]) if item.get("raw_value_boolean") is not None else None,
-                    raw_value_string=str(item.get("raw_value_string")) if item.get("raw_value_string") is not None else None,
-                    source_unit=item.get("source_unit"),
-                    normalized_unit=item.get("normalized_unit"),
-                    quality_code=item.get("opcua_quality_code") or item.get("quality_code") or "Good",
-                    normalization_status=item.get("normalization_status", "NORMALIZED"),
-                    sampling_interval_ms=int(item.get("sampling_interval_ms", 1000)),
-                    simulator_flag=bool(item.get("simulator_flag", True)),
-                )
-                readings_to_add.append(reading)
-                existing_event_ids.add(eid)
-                accepted += 1
+                record_dict = {
+                    "id": str(uuid.uuid4()),
+                    "event_id": eid,
+                    "organization_id": org_id,
+                    "machine_id": mach_id,
+                    "signal_id": sig_id,
+                    "connector_id": item.get("connector_id"),
+                    "gateway_id": gateway_id,
+                    "mapping_version": int(item.get("mapping_version", 1)),
+                    "source_timestamp": src_ts,
+                    "server_timestamp": srv_ts,
+                    "gateway_received_at": gw_ts,
+                    "ingestion_timestamp": datetime.now(timezone.utc),
+                    "source_value": str(item.get("source_value")) if item.get("source_value") is not None else None,
+                    "normalized_value": float(item["normalized_value"]) if item.get("normalized_value") is not None else None,
+                    "raw_value_numeric": float(item["raw_value_numeric"]) if item.get("raw_value_numeric") is not None else None,
+                    "raw_value_boolean": bool(item["raw_value_boolean"]) if item.get("raw_value_boolean") is not None else None,
+                    "raw_value_string": str(item.get("raw_value_string")) if item.get("raw_value_string") is not None else None,
+                    "source_unit": item.get("source_unit"),
+                    "normalized_unit": item.get("normalized_unit"),
+                    "quality_code": item.get("opcua_quality_code") or item.get("quality_code") or "Good",
+                    "normalization_status": item.get("normalization_status", "NORMALIZED"),
+                    "sampling_interval_ms": int(item.get("sampling_interval_ms", 1000)),
+                    "simulator_flag": bool(item.get("simulator_flag", True)),
+                }
+                records_to_insert.append(record_dict)
             except Exception as e:
-                logger.error(f"[IngestionService] Error processing reading {eid}: {e}")
+                logger.error(f"[IngestionService] Error preparing reading {eid}: {e}")
                 rejected += 1
 
-        if readings_to_add:
-            db.session.bulk_save_objects(readings_to_add)
+        # Atomic Idempotent Insertion (Fix 2: ON CONFLICT DO NOTHING)
+        if records_to_insert:
+            dialect_name = db.session.bind.dialect.name if (db.session.bind and hasattr(db.session.bind, "dialect")) else "postgresql"
+            try:
+                if dialect_name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as pg_insert
+                    stmt = pg_insert(SignalReading).values(records_to_insert)
+                    stmt = stmt.on_conflict_do_nothing(index_elements=["event_id"])
+                elif dialect_name == "sqlite":
+                    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+                    stmt = sqlite_insert(SignalReading).values(records_to_insert)
+                    stmt = stmt.on_conflict_do_nothing(index_elements=["event_id"])
+                else:
+                    from sqlalchemy.dialects.postgresql import insert as gen_insert
+                    stmt = gen_insert(SignalReading).values(records_to_insert)
+                    stmt = stmt.on_conflict_do_nothing(index_elements=["event_id"])
 
-        # Record ingestion batch audit
-        batch_record = IngestionBatch(
-            gateway_id=gateway_id,
-            batch_identifier=batch_id,
-            accepted_count=accepted,
-            rejected_count=rejected,
-            status="ACCEPTED" if rejected == 0 else ("PARTIAL" if accepted > 0 else "REJECTED"),
-        )
-        db.session.add(batch_record)
+                result = db.session.execute(stmt)
+                inserted_count = result.rowcount if (result.rowcount is not None and result.rowcount >= 0) else len(records_to_insert)
+                accepted += inserted_count
+                duplicates += (len(records_to_insert) - inserted_count)
+            except Exception as e:
+                logger.error(f"[IngestionService] Atomic insert error: {e}")
+                db.session.rollback()
+                raise
+
+        # Record ingestion batch audit (safely handling duplicate batch identifier)
+        existing_batch = IngestionBatch.query.filter_by(batch_identifier=batch_id).first()
+        if not existing_batch:
+            batch_record = IngestionBatch(
+                gateway_id=gateway_id,
+                batch_identifier=batch_id,
+                accepted_count=accepted,
+                rejected_count=rejected,
+                status="ACCEPTED" if rejected == 0 else ("PARTIAL" if accepted > 0 else "REJECTED"),
+            )
+            db.session.add(batch_record)
+        else:
+            existing_batch.accepted_count += accepted
 
         try:
             db.session.commit()
