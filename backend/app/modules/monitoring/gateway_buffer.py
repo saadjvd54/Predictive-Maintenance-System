@@ -44,6 +44,7 @@ class BoundedGatewayBuffer:
         self._dropped_last_timestamp: Optional[str] = None
         self._overflow_alert_triggered: bool = False
         self._buffered_disk_count: int = 0
+        self._quarantined_corrupt_count: int = 0  # Carry forward security: Quarantined corrupt records counter
         self._is_running: bool = False
         self._worker_task: Optional[asyncio.Task] = None
         self._ingestion_handler: Optional[Callable[[List[NormalizedReadingMessage]], Any]] = None
@@ -113,6 +114,7 @@ class BoundedGatewayBuffer:
             "max_disk_buffer_bytes": self.max_disk_buffer_bytes,
             "disk_utilization_pct": util_pct,
             "dropped_readings": self._dropped_count,
+            "quarantined_corrupt_records": self._quarantined_corrupt_count,
             "dropped_first_timestamp": self._dropped_first_timestamp,
             "dropped_last_timestamp": self._dropped_last_timestamp,
             "overflow_active": disk_bytes >= self.max_disk_buffer_bytes,
@@ -259,12 +261,14 @@ class BoundedGatewayBuffer:
         """
         overflow_file = self.disk_buffer_dir / "gateway_overflow.jsonl"
         recovering_file = self.disk_buffer_dir / "gateway_recovering.jsonl"
+        quarantine_file = self.disk_buffer_dir / "gateway_corrupt_records.jsonl"
 
         # 1. If no recovering file exists, but overflow file exists and is non-empty, atomically stage it
         if not recovering_file.exists() or recovering_file.stat().st_size == 0:
             if overflow_file.exists() and overflow_file.stat().st_size > 0:
                 try:
                     os.replace(overflow_file, recovering_file)
+                    self._fsync_dir()
                 except Exception as e:
                     logger.error(f"[GatewayBuffer] Error staging overflow file: {e}")
                     return
@@ -285,10 +289,34 @@ class BoundedGatewayBuffer:
                         valid_readings.append(NormalizedReadingMessage(**data))
                     except Exception as ex:
                         corrupt_lines_count += 1
-                        logger.warning(f"[GatewayBuffer] Discarding corrupt/partial JSONL line during recovery: {ex}")
+                        self._quarantined_corrupt_count += 1
+                        # Carry forward security: Quarantine corrupt records with critical alert
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        logger.critical(
+                            f"[CRITICAL BUFFER INTEGRITY ALERT] Quarantined corrupted buffer record on gateway '{self.gateway_id}': "
+                            f"{ex}. Raw record: {line_str[:120]}..."
+                        )
+                        try:
+                            with open(quarantine_file, "a", encoding="utf-8") as qf:
+                                qf.write(json.dumps({
+                                    "quarantined_at": now_iso,
+                                    "gateway_id": self.gateway_id,
+                                    "error": str(ex),
+                                    "raw_line": line_str,
+                                }) + "\n")
+                                qf.flush()
+                                try:
+                                    os.fsync(qf.fileno())
+                                except (AttributeError, OSError):
+                                    pass
+                        except Exception as q_err:
+                            logger.error(f"[GatewayBuffer] Failed to write quarantine log: {q_err}")
 
             if corrupt_lines_count > 0:
-                logger.warning(f"[GatewayBuffer] Recovered {len(valid_readings)} valid readings, skipped {corrupt_lines_count} corrupted lines.")
+                logger.warning(
+                    f"[GatewayBuffer] Recovered {len(valid_readings)} valid readings, "
+                    f"quarantined {corrupt_lines_count} corrupted records to {quarantine_file.name}."
+                )
 
             # 3. Safely load into memory queue without dropping unacknowledged readings
             async with self._lock:
@@ -306,6 +334,7 @@ class BoundedGatewayBuffer:
                     if not remaining:
                         try:
                             recovering_file.unlink(missing_ok=True)
+                            self._fsync_dir()
                         except Exception:
                             pass
                     else:
@@ -318,5 +347,20 @@ class BoundedGatewayBuffer:
                                 os.fsync(f.fileno())
                             except (AttributeError, OSError):
                                 pass
+                        self._fsync_dir()
         except Exception as e:
             logger.error(f"[GatewayBuffer] Error during crash-safe recovery: {e}")
+
+    def _fsync_dir(self) -> None:
+        """Best-effort directory fsync for metadata durability on platforms that support it."""
+        if os.name != "posix":
+            return
+        try:
+            if hasattr(os, "O_DIRECTORY"):
+                dfd = os.open(str(self.disk_buffer_dir), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+        except (AttributeError, OSError):
+            pass

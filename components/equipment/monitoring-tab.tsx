@@ -314,6 +314,26 @@ export default function MonitoringTab({
                 <span className={`size-2 rounded-full ${stateInfo.dot}`} />
                 {stateInfo.label}
               </span>
+              {/* Requirement 12: Clearly distinguish simulator readings from physical PLC readings */}
+              {readings.length > 0 && (
+                readings[0].simulator_flag !== false ? (
+                  <span
+                    className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-800 shadow-xs"
+                    title="Data originates from simulated OPC UA machinery. No physical PLC connected."
+                  >
+                    <Radio className="size-3 text-amber-600 animate-pulse" />
+                    Simulated Telemetry (OPC UA Simulator)
+                  </span>
+                ) : (
+                  <span
+                    className="inline-flex items-center gap-1.5 rounded-full border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800 shadow-xs"
+                    title="Data originates from live physical PLC / Purdue Level 1/2 control network."
+                  >
+                    <Server className="size-3 text-emerald-600" />
+                    Physical Industrial PLC (Purdue L1/L2)
+                  </span>
+                )
+              )}
             </div>
             <p className="text-xs text-slate-500">
               Live industrial telemetry collection pipeline with TimescaleDB time-series storage and unit normalization.

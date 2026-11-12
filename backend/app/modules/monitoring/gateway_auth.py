@@ -25,17 +25,28 @@ class GatewayIdentity:
     secret: str
     status: str = "ACTIVE"  # "ACTIVE", "REVOKED", "SUSPENDED"
     name: str = "Industrial Edge Gateway"
+    allow_wildcard: bool = False  # Carry forward security: Wildcard authorization is disabled by default
 
     def is_active(self) -> bool:
         return self.status == "ACTIVE"
 
     def is_authorized_for(self, organization_id: str, machine_id: str) -> bool:
-        """Verify that the gateway is authorized for the given tenant and equipment."""
+        """Verify that the gateway is authorized for the given tenant and equipment.
+        
+        Wildcard machine authorization ('*') is strictly disabled by default to enforce
+        explicit per-machine authorization boundaries.
+        """
         if not self.is_active():
             return False
         if self.organization_id != organization_id:
             return False
         if "*" in self.assigned_equipment_ids:
+            if not self.allow_wildcard:
+                logger.warning(
+                    f"[Security Policy] Wildcard machine authorization rejected on gateway '{self.gateway_id}' "
+                    f"(allow_wildcard=False). Explicit machine assignment required."
+                )
+                return False
             return True
         return machine_id in self.assigned_equipment_ids
 
@@ -66,6 +77,7 @@ class GatewayAuthRegistry:
                         secret=gw_info.get("secret", ""),
                         status=gw_info.get("status", "ACTIVE"),
                         name=gw_info.get("name", gw_id),
+                        allow_wildcard=bool(gw_info.get("allow_wildcard", False)),
                     ))
                 logger.info(f"[GatewayAuth] Loaded {len(cls._gateways)} gateways from GATEWAY_REGISTRY_JSON")
             except Exception as e:

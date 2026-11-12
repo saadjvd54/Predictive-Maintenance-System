@@ -39,11 +39,13 @@ class PharmaOPCUASimulator:
         self,
         port: int = 48401,
         enable_security: bool = False,
+        enable_dynamic_simulation: bool = False,
         cert_dir: Optional[str] = None,
         valid_users: Optional[Dict[str, str]] = None,
     ):
         self.port = port
         self.enable_security = enable_security
+        self.enable_dynamic_simulation = enable_dynamic_simulation
         self.cert_dir = cert_dir or os.path.join(os.path.dirname(__file__), ".certs")
         self.valid_users = valid_users or {"operator": "PharmaSecure123!"}
         self.server: Optional[Server] = None
@@ -52,11 +54,23 @@ class PharmaOPCUASimulator:
         self.key_path: Optional[str] = None
         self._server_cert_der: Optional[bytes] = None
 
-        # Node references for simulated telemetry
+        # Node references for simulated telemetry across all 7 industrial categories
         self.blister_speed_node = None
+        self.blister_rpm_node = None
         self.blister_temp_node = None
+        self.blister_motor_temp_node = None
         self.blister_vibration_node = None
+        self.blister_bearing_vib_node = None
+        self.blister_current_node = None
         self.blister_vacuum_node = None
+        self.blister_pressure_node = None
+        self.blister_alarm_node = None
+        self.blister_estop_node = None
+        self.blister_cycle_node = None
+        self.blister_production_count_node = None
+        
+        self._simulation_task: Optional[asyncio.Task] = None
+        self._is_running: bool = False
 
     async def start(self) -> None:
         """Initialize and start the OPC UA server."""
@@ -99,34 +113,132 @@ class PharmaOPCUASimulator:
         objects = self.server.nodes.objects
         blister_machine = await objects.add_object(idx, "BlisterPackagingMachine_01")
 
-        # Create Critical Sensor Nodes
+        # Create Critical Sensor Nodes across all 7 industrial categories (Requirement 3)
+        # 1. Speed & RPM
         self.blister_speed_node = await blister_machine.add_variable(
-            idx, "Speed_CPM", 240.0, ua.VariantType.Double
+            ua.NodeId("BlisterPackagingMachine_01.Speed_CPM", idx), "Speed_CPM", 240.0, ua.VariantType.Double
         )
+        self.blister_rpm_node = await blister_machine.add_variable(
+            ua.NodeId("BlisterPackagingMachine_01.MachineSpeedRPM", idx), "MachineSpeedRPM", 1440.0, ua.VariantType.Double
+        )
+        # 2. Temperature (Sealing & Motor)
         self.blister_temp_node = await blister_machine.add_variable(
-            idx, "SealingTemperature", 142.5, ua.VariantType.Double
+            ua.NodeId("BlisterPackagingMachine_01.SealingTemperature", idx), "SealingTemperature", 142.5, ua.VariantType.Double
         )
+        self.blister_motor_temp_node = await blister_machine.add_variable(
+            ua.NodeId("BlisterPackagingMachine_01.MotorTemperature", idx), "MotorTemperature", 52.4, ua.VariantType.Double
+        )
+        # 3. Vibration (Overall & Bearing)
         self.blister_vibration_node = await blister_machine.add_variable(
-            idx, "MainDriveMotorVibration", 1.25, ua.VariantType.Double
+            ua.NodeId("BlisterPackagingMachine_01.MainDriveMotorVibration", idx), "MainDriveMotorVibration", 1.25, ua.VariantType.Double
         )
+        self.blister_bearing_vib_node = await blister_machine.add_variable(
+            ua.NodeId("BlisterPackagingMachine_01.BearingVibration", idx), "BearingVibration", 0.85, ua.VariantType.Double
+        )
+        # 4. Motor Current
+        self.blister_current_node = await blister_machine.add_variable(
+            ua.NodeId("BlisterPackagingMachine_01.MainDriveMotorCurrent", idx), "MainDriveMotorCurrent", 14.8, ua.VariantType.Double
+        )
+        # 5. Pressure (Vacuum & Pneumatic)
         self.blister_vacuum_node = await blister_machine.add_variable(
-            idx, "VacuumLevel", -85.2, ua.VariantType.Double
+            ua.NodeId("BlisterPackagingMachine_01.VacuumLevel", idx), "VacuumLevel", -0.85, ua.VariantType.Double
+        )
+        self.blister_pressure_node = await blister_machine.add_variable(
+            ua.NodeId("BlisterPackagingMachine_01.FormingAirPressure", idx), "FormingAirPressure", 6.2, ua.VariantType.Double
+        )
+        # 6. Alarms & Safety
+        self.blister_alarm_node = await blister_machine.add_variable(
+            ua.NodeId("BlisterPackagingMachine_01.MachineFaultAlarm", idx), "MachineFaultAlarm", False, ua.VariantType.Boolean
+        )
+        self.blister_estop_node = await blister_machine.add_variable(
+            ua.NodeId("BlisterPackagingMachine_01.EmergencyStopActive", idx), "EmergencyStopActive", False, ua.VariantType.Boolean
+        )
+        # 7. Cycles & Production Count
+        self.blister_cycle_node = await blister_machine.add_variable(
+            ua.NodeId("BlisterPackagingMachine_01.CumulativeCycleCount", idx), "CumulativeCycleCount", 128450, ua.VariantType.Int32
+        )
+        self.blister_production_count_node = await blister_machine.add_variable(
+            ua.NodeId("BlisterPackagingMachine_01.BatchProductionCount", idx), "BatchProductionCount", 1420, ua.VariantType.Int32
         )
 
-        # Set read permissions for all variables
-        for node in [
+        # Set read permissions for all variables (Strict read-only safety)
+        all_sim_nodes = [
             self.blister_speed_node,
+            self.blister_rpm_node,
             self.blister_temp_node,
+            self.blister_motor_temp_node,
             self.blister_vibration_node,
-            self.blister_vacuum_node
-        ]:
-            await node.set_read_only()
+            self.blister_bearing_vib_node,
+            self.blister_current_node,
+            self.blister_vacuum_node,
+            self.blister_pressure_node,
+            self.blister_alarm_node,
+            self.blister_estop_node,
+            self.blister_cycle_node,
+            self.blister_production_count_node,
+        ]
+        for node in all_sim_nodes:
+            if node:
+                await node.set_read_only()
 
         await self.server.start()
-        logger.info(f"PharmaPredict OPC UA Simulator started at {self.endpoint_url}")
+        self._is_running = True
+        if self.enable_dynamic_simulation:
+            self._simulation_task = asyncio.create_task(self._simulation_loop())
+        logger.info(f"PharmaPredict OPC UA Simulator started at {self.endpoint_url} with 13 industrial sensor nodes.")
+
+    async def _simulation_loop(self) -> None:
+        """Periodically update sensor values with realistic industrial fluctuations."""
+        import math
+        import random
+        t = 0.0
+        while self._is_running:
+            try:
+                await asyncio.sleep(1.0)
+                t += 1.0
+                if not self.server:
+                    break
+
+                # Dynamic subtle fluctuations
+                temp_val = 142.5 + 0.8 * math.sin(t / 10.0) + random.uniform(-0.1, 0.1)
+                motor_temp = 52.4 + 0.5 * math.sin(t / 15.0) + random.uniform(-0.05, 0.05)
+                vib_val = 1.25 + 0.15 * math.sin(t / 5.0) + random.uniform(-0.02, 0.02)
+                bearing_vib = 0.85 + 0.1 * math.sin(t / 4.0) + random.uniform(-0.02, 0.02)
+                curr_val = 14.8 + 0.4 * math.cos(t / 8.0) + random.uniform(-0.05, 0.05)
+                rpm_val = 1440.0 + 5.0 * math.sin(t / 7.0)
+                vac_val = -0.85 + 0.02 * math.cos(t / 6.0)
+
+                if self.blister_temp_node:
+                    await self.blister_temp_node.write_value(round(temp_val, 2))
+                if self.blister_motor_temp_node:
+                    await self.blister_motor_temp_node.write_value(round(motor_temp, 2))
+                if self.blister_vibration_node:
+                    await self.blister_vibration_node.write_value(round(vib_val, 3))
+                if self.blister_bearing_vib_node:
+                    await self.blister_bearing_vib_node.write_value(round(bearing_vib, 3))
+                if self.blister_current_node:
+                    await self.blister_current_node.write_value(round(curr_val, 2))
+                if self.blister_rpm_node:
+                    await self.blister_rpm_node.write_value(round(rpm_val, 1))
+                if self.blister_vacuum_node:
+                    await self.blister_vacuum_node.write_value(round(vac_val, 3))
+                if self.blister_cycle_node and int(t) % 2 == 0:
+                    curr_c = await self.blister_cycle_node.read_value()
+                    await self.blister_cycle_node.write_value(curr_c + 1)
+                if self.blister_production_count_node and int(t) % 4 == 0:
+                    curr_p = await self.blister_production_count_node.read_value()
+                    await self.blister_production_count_node.write_value(curr_p + 1)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"[Simulator] Dynamic tick error: {e}")
 
     async def stop(self) -> None:
-        """Stop the OPC UA server and release the network port."""
+        """Stop the OPC UA server, cancel simulation tasks, and release network port."""
+        self._is_running = False
+        if self._simulation_task and not self._simulation_task.done():
+            self._simulation_task.cancel()
         if self.server:
             try:
                 await self.server.stop()

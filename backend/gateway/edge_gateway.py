@@ -77,6 +77,7 @@ class EdgeGatewayConfig:
     
     # Health & Telemetry
     heartbeat_interval_sec: float = 30.0
+    is_simulator: bool = True  # Distinguish simulated vs physical PLC telemetry (Requirement 12)
     
     # Monitored Signal Definitions: {signal_id: {node_id, unit, sampling_interval_ms, ...}}
     monitored_nodes: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -84,6 +85,20 @@ class EdgeGatewayConfig:
     @classmethod
     def from_env(cls) -> "EdgeGatewayConfig":
         """Load configuration from environment variables with safe defaults."""
+        raw_signals = {}
+        signals_json = os.getenv("SIGNAL_MAPPINGS_JSON")
+        if signals_json:
+            try:
+                parsed = json.loads(signals_json)
+                if isinstance(parsed, list):
+                    raw_signals = {s.get("signal_id", f"sig-{i}"): s for i, s in enumerate(parsed)}
+                elif isinstance(parsed, dict):
+                    raw_signals = parsed
+            except Exception as e:
+                logger.warning(f"Failed to parse SIGNAL_MAPPINGS_JSON: {e}")
+
+        is_sim = os.getenv("IS_SIMULATOR", "true").lower() in ("true", "1", "yes")
+
         return cls(
             gateway_id=os.getenv("GATEWAY_ID", "gw-edge-01"),
             organization_id=os.getenv("ORGANIZATION_ID", ""),
@@ -107,6 +122,8 @@ class EdgeGatewayConfig:
             batch_size=int(os.getenv("BATCH_SIZE", "50")),
             flush_interval_sec=float(os.getenv("FLUSH_INTERVAL_SEC", "1.0")),
             heartbeat_interval_sec=float(os.getenv("HEARTBEAT_INTERVAL_SEC", "30.0")),
+            is_simulator=is_sim,
+            monitored_nodes=raw_signals,
         )
 
     def __repr__(self) -> str:
@@ -166,6 +183,49 @@ class EdgeGateway:
         self._delivered_readings: int = 0
         self._failed_deliveries: int = 0
         self._rejected_identity_violations: int = 0
+
+        # Monitored signal configurations (Dynamic Signal Mapping)
+        self._monitored_signals: Dict[str, Dict[str, Any]] = {}
+        if config.monitored_nodes:
+            self.set_monitored_signals(config.monitored_nodes)
+
+    def add_monitored_signal(self, signal_config: Dict[str, Any]) -> None:
+        """Register or update an equipment signal configuration to monitor dynamically."""
+        sig_id = signal_config.get("signal_id") or signal_config.get("id") or str(uuid.uuid4())
+        node_id = signal_config.get("source_node_id")
+        if not node_id:
+            logger.warning("[EdgeGateway] Cannot add signal without source_node_id.")
+            return
+
+        self._monitored_signals[sig_id] = {
+            "signal_id": sig_id,
+            "source_node_id": node_id,
+            "signal_code": signal_config.get("signal_code", "CUSTOM_SIGNAL"),
+            "custom_name": signal_config.get("custom_name") or signal_config.get("signal_name"),
+            "scaling_factor": float(signal_config.get("scaling_factor", 1.0)),
+            "offset": float(signal_config.get("offset", 0.0)),
+            "source_unit": signal_config.get("source_unit"),
+            "normalized_unit": signal_config.get("normalized_unit") or signal_config.get("standard_unit"),
+            "sampling_interval_ms": int(signal_config.get("sampling_interval_ms", 1000)),
+            "mapping_version": int(signal_config.get("mapping_version", 1)),
+            "connector_id": signal_config.get("connector_id", "conn-opcua-01"),
+        }
+        logger.info(f"[EdgeGateway] Registered monitored signal '{sig_id}' -> Node '{node_id}'")
+
+    def set_monitored_signals(self, signals: Any) -> None:
+        """Configure or replace active monitored signal mappings."""
+        self._monitored_signals.clear()
+        if isinstance(signals, list):
+            for s in signals:
+                if isinstance(s, dict):
+                    self.add_monitored_signal(s)
+        elif isinstance(signals, dict):
+            for sig_id, s in signals.items():
+                if isinstance(s, dict):
+                    s_copy = dict(s)
+                    if "signal_id" not in s_copy:
+                        s_copy["signal_id"] = sig_id
+                    self.add_monitored_signal(s_copy)
 
     def _init_disk_buffer(self) -> None:
         """Create and enforce restrictive filesystem permissions on the disk buffer directory."""
@@ -280,6 +340,7 @@ class EdgeGateway:
         headers = {
             "Content-Type": "application/json",
             "X-Gateway-Secret": self.config.gateway_secret,
+            "X-Gateway-ID": self.config.gateway_id,
         }
 
         try:
@@ -351,9 +412,10 @@ class EdgeGateway:
         # 4. Write initial health state for Docker healthcheck
         self._write_health_state()
 
-        # 5. Launch background reconnection and heartbeat tasks
+        # 5. Launch background reconnection, heartbeat, and telemetry tasks
         self._tasks.append(asyncio.create_task(self._reconnection_loop()))
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
+        self._tasks.append(asyncio.create_task(self._telemetry_loop()))
         
         logger.info(f"[EdgeGateway] Edge Gateway {self.config.gateway_id} initialized and operational.")
 
@@ -423,6 +485,86 @@ class EdgeGateway:
             except Exception as e:
                 logger.error(f"[EdgeGateway] Error in heartbeat loop: {e}")
 
+    async def _telemetry_loop(self) -> None:
+        """Continuous, strictly read-only polling of mapped OPC UA signals (Requirement 8 & 9)."""
+        logger.info(f"[EdgeGateway] Telemetry acquisition loop started with {len(self._monitored_signals)} mapped signals.")
+        
+        while self._is_running:
+            try:
+                # If disconnected, wait for reconnection loop to re-establish
+                if not self.opcua_client.is_connected():
+                    await asyncio.sleep(1.0)
+                    continue
+
+                if not self._monitored_signals:
+                    await asyncio.sleep(2.0)
+                    continue
+
+                for sig_id, sig_conf in list(self._monitored_signals.items()):
+                    if not self._is_running:
+                        break
+                    node_id = sig_conf["source_node_id"]
+                    try:
+                        raw_val = await self.opcua_client.read_value(node_id)
+                        now_dt = datetime.now(timezone.utc)
+                        now_iso = now_dt.isoformat()
+
+                        # Apply engineering scaling and offset (Requirement 4)
+                        scaling = sig_conf["scaling_factor"]
+                        offset = sig_conf["offset"]
+                        norm_val = None
+                        raw_numeric = None
+                        raw_bool = None
+                        raw_str = None
+
+                        if isinstance(raw_val, (int, float)) and not isinstance(raw_val, bool):
+                            raw_numeric = float(raw_val)
+                            norm_val = round((raw_numeric * scaling) + offset, 4)
+                        elif isinstance(raw_val, bool):
+                            raw_bool = raw_val
+                            norm_val = 1.0 if raw_bool else 0.0
+                        elif raw_val is not None:
+                            raw_str = str(raw_val)
+                            try:
+                                raw_numeric = float(raw_str)
+                                norm_val = round((raw_numeric * scaling) + offset, 4)
+                            except ValueError:
+                                pass
+
+                        reading = NormalizedReadingMessage(
+                            organization_id=self.config.organization_id,
+                            machine_id=self.config.equipment_id,
+                            signal_id=sig_id,
+                            source_node_id=node_id,
+                            mapping_version=sig_conf["mapping_version"],
+                            source_timestamp=now_iso,
+                            source_value=raw_val,
+                            normalized_value=norm_val,
+                            raw_value_numeric=raw_numeric,
+                            raw_value_boolean=raw_bool,
+                            raw_value_string=raw_str,
+                            source_unit=sig_conf["source_unit"],
+                            normalized_unit=sig_conf["normalized_unit"],
+                            opcua_quality_code="Good",
+                            normalization_status="NORMALIZED",
+                            sampling_interval_ms=sig_conf["sampling_interval_ms"],
+                            connector_id=sig_conf["connector_id"],
+                            gateway_id=self.config.gateway_id,
+                            simulator_flag=self.config.is_simulator,
+                        )
+
+                        await self.ingest_reading(reading)
+
+                    except Exception as e:
+                        logger.warning(f"[EdgeGateway] Error reading node '{node_id}' for signal {sig_id}: {e}")
+
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[EdgeGateway] Error in telemetry acquisition loop: {e}")
+                await asyncio.sleep(2.0)
+
     def _write_health_state(self) -> None:
         """Persist real-time gateway health and metrics for the container healthcheck probe."""
         try:
@@ -456,6 +598,8 @@ class EdgeGateway:
             "dropped_last_timestamp": buf_metrics.get("dropped_last_timestamp"),
             "overflow_active": buf_metrics.get("overflow_active", False),
             "overflow_policy": buf_metrics.get("overflow_policy", "BOUNDED_DROP_ON_CAPACITY_EXCEEDED"),
+            "quarantined_corrupt_records": buf_metrics.get("quarantined_corrupt_records", 0),
+            "monitored_signals_count": len(self._monitored_signals),
             "delivered_batches": self._delivered_batches,
             "delivered_readings": self._delivered_readings,
             "failed_deliveries": self._failed_deliveries,
