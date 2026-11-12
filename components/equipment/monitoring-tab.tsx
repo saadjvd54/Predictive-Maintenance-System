@@ -7,6 +7,7 @@ import {
   Square,
   RefreshCw,
   AlertTriangle,
+  AlertCircle,
   CheckCircle2,
   Clock,
   Database,
@@ -562,10 +563,23 @@ export default function MonitoringTab({
                     <span className="font-mono truncate max-w-[120px]" title={reading.source_node_id}>
                       {reading.source_node_id || 'Tag'}
                     </span>
-                    <span className="inline-flex items-center gap-1 font-semibold text-emerald-600">
-                      <CheckCircle2 className="size-3" />
-                      {reading.quality_code || 'Good'}
-                    </span>
+                    {/* Requirement 3: Clearly display good, bad, or stale/uncertain quality codes */}
+                    {reading.quality_code === 'Good' || !reading.quality_code ? (
+                      <span className="inline-flex items-center gap-1 font-semibold text-emerald-600">
+                        <CheckCircle2 className="size-3" />
+                        Good
+                      </span>
+                    ) : reading.quality_code === 'Bad' ? (
+                      <span className="inline-flex items-center gap-1 font-semibold text-rose-600">
+                        <AlertTriangle className="size-3 text-rose-500" />
+                        Bad
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 font-semibold text-amber-600">
+                        <AlertCircle className="size-3 text-amber-500" />
+                        {reading.quality_code}
+                      </span>
+                    )}
                   </div>
                 </div>
               )

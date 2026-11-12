@@ -251,6 +251,7 @@ def internal_ingest_readings():
             readings_data=readings,
             batch_identifier=batch_id,
             authenticated_gateway=auth_gateway,
+            metrics_data=payload.get("metrics"),
         )
         return jsonify({
             "message": "Batch ingested successfully.",

@@ -10,6 +10,7 @@ from app.models.monitoring import (
     SignalFreshness,
     MonitoringSession,
     MonitoringState,
+    GatewayHealthRecord,
 )
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class IngestionService:
         readings_data: List[Dict[str, Any]],
         batch_identifier: Optional[str] = None,
         authenticated_gateway: Optional[Any] = None,
+        metrics_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Ingest a batch of normalized readings idempotently with atomic conflict handling and strict authorization (Fix 1 & Fix 2)."""
         import uuid
@@ -156,6 +158,30 @@ class IngestionService:
             db.session.add(batch_record)
         else:
             existing_batch.accepted_count += accepted
+
+        # Update or record GatewayHealthRecord for gateway delivery observability (Requirement 2 & 3)
+        if metrics_data:
+            try:
+                now_utc = datetime.now(timezone.utc)
+                gw_health = GatewayHealthRecord.query.filter_by(gateway_id=gateway_id).first()
+                if not gw_health:
+                    gw_health = GatewayHealthRecord(
+                        gateway_id=gateway_id,
+                        connection_status="ONLINE",
+                        last_heartbeat=now_utc,
+                        queue_depth=metrics_data.get("queue_depth", 0),
+                        buffered_readings=metrics_data.get("buffered_readings", 0),
+                        dropped_readings=metrics_data.get("dropped_readings", 0),
+                    )
+                    db.session.add(gw_health)
+                else:
+                    gw_health.connection_status = "ONLINE"
+                    gw_health.last_heartbeat = now_utc
+                    gw_health.queue_depth = metrics_data.get("queue_depth", gw_health.queue_depth)
+                    gw_health.buffered_readings = metrics_data.get("buffered_readings", gw_health.buffered_readings)
+                    gw_health.dropped_readings = metrics_data.get("dropped_readings", gw_health.dropped_readings)
+            except Exception as e:
+                logger.warning(f"[IngestionService] GatewayHealthRecord update skipped: {e}")
 
         try:
             db.session.commit()

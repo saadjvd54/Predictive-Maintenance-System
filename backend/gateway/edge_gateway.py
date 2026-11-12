@@ -331,10 +331,18 @@ class EdgeGateway:
             )
 
         batch_id = f"batch-{self.config.gateway_id}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+        buf_metrics = self.buffer.get_metrics()
         payload = {
             "gateway_id": self.config.gateway_id,
             "batch_identifier": batch_id,
             "readings": [item.to_dict() for item in batch],
+            "metrics": {
+                "queue_depth": buf_metrics.get("queue_depth", 0),
+                "buffered_readings": buf_metrics.get("buffered_readings", 0),
+                "dropped_readings": buf_metrics.get("dropped_readings", 0),
+                "disk_usage_bytes": buf_metrics.get("disk_usage_bytes", 0),
+                "overflow_active": buf_metrics.get("overflow_active", False),
+            },
         }
 
         headers = {

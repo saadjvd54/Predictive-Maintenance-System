@@ -360,17 +360,50 @@ class MonitoringLifecycleManager:
         # Check preconditions
         can_activate, reason, signals = cls.check_activation_preconditions(machine_id, organization_id)
 
+        observed_state = session.observed_state if session else MonitoringState.STOPPED
+        status_reason = session.status_reason if session else None
+        simulator_flag = True
+
+        # Check for active external edge gateway telemetry stream (Requirement 2 & 3)
+        if not pipeline:
+            from app.models.monitoring import SignalReading
+            latest_reading = (
+                SignalReading.query.filter_by(machine_id=machine_id, organization_id=organization_id)
+                .order_by(SignalReading.source_timestamp.desc())
+                .first()
+            )
+            if latest_reading and latest_reading.source_timestamp:
+                now_utc = datetime.now(timezone.utc)
+                ts = latest_reading.source_timestamp
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age_sec = (now_utc - ts).total_seconds()
+                simulator_flag = latest_reading.simulator_flag
+
+                gw_health = GatewayHealthRecord.query.filter_by(gateway_id=latest_reading.gateway_id).first()
+                if gw_health:
+                    buffer_metrics = {
+                        "queue_depth": gw_health.queue_depth,
+                        "buffered_readings": gw_health.buffered_readings,
+                        "dropped_readings": gw_health.dropped_readings,
+                    }
+
+                if age_sec <= 20.0:
+                    observed_state = MonitoringState.ACTIVE
+                    status_reason = f"Edge Gateway '{latest_reading.gateway_id}' streaming live telemetry ({round(age_sec, 1)}s ago)."
+                    active_subscriptions = len(signals)
+
         return {
             "machine_id": machine_id,
             "machine_name": machine.equipment_name,
             "desired_state": session.desired_state if session else MonitoringState.STOPPED,
-            "observed_state": session.observed_state if session else MonitoringState.STOPPED,
-            "status_reason": session.status_reason if session else None,
+            "observed_state": observed_state,
+            "status_reason": status_reason,
             "activated_at": session.activated_at.isoformat() if session and session.activated_at else None,
             "active_subscriptions": active_subscriptions,
             "total_mapped_signals": len(signals),
             "can_activate": can_activate,
             "activation_precondition_reason": reason,
             "buffer_metrics": buffer_metrics,
-            "simulator_flag": True,
+            "simulator_flag": simulator_flag,
         }
