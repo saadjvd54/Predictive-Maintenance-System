@@ -344,6 +344,111 @@ def export_historical_telemetry(machine_id: str):
 
 
 # ==============================================================================
+# PHASE 3 STEP 3.3: PLANT-WIDE OBSERVABILITY & FLEET MONITORING ENDPOINTS
+# ==============================================================================
+
+@monitoring_bp.route("/monitoring/fleet/overview", methods=["GET"])
+@login_required
+def get_plant_fleet_overview():
+    """Retrieve plant-wide fleet KPI summary from actual database records."""
+    from app.modules.monitoring.fleet_service import FleetMonitoringService
+    try:
+        overview = FleetMonitoringService.get_plant_overview(g.current_org_id)
+        return jsonify(overview), 200
+    except Exception as e:
+        logger.error(f"Error fetching plant overview: {e}")
+        return jsonify({"error": "Overview Error", "message": str(e)}), 500
+
+
+@monitoring_bp.route("/monitoring/fleet", methods=["GET"])
+@login_required
+def get_fleet_machines():
+    """Retrieve searchable, filterable, and paginated equipment fleet status grid."""
+    from app.modules.monitoring.fleet_service import FleetMonitoringService
+    site_id = request.args.get("site_id")
+    category_id = request.args.get("category_id")
+    status = request.args.get("status")
+    search = request.args.get("search")
+    sort_by = request.args.get("sort_by", "severity")
+    order = request.args.get("order", "asc")
+    page = int(request.args.get("page", 1))
+    per_page = int(request.args.get("per_page", 12))
+
+    try:
+        fleet_data = FleetMonitoringService.get_fleet_machines(
+            organization_id=g.current_org_id,
+            site_id=site_id,
+            category_id=category_id,
+            status=status,
+            search=search,
+            sort_by=sort_by,
+            order=order,
+            page=page,
+            per_page=per_page,
+        )
+        return jsonify(fleet_data), 200
+    except Exception as e:
+        logger.error(f"Error fetching fleet machines: {e}")
+        return jsonify({"error": "Fleet Query Error", "message": str(e)}), 500
+
+
+@monitoring_bp.route("/monitoring/fleet/alerts", methods=["GET"])
+@login_required
+def get_fleet_alerts():
+    """Retrieve centralized plant-wide equipment alarms with threshold context."""
+    from app.modules.monitoring.fleet_service import FleetMonitoringService
+    status = request.args.get("status")
+    severity = request.args.get("severity")
+    machine_id = request.args.get("machine_id")
+    limit = int(request.args.get("limit", 50))
+
+    try:
+        alerts = FleetMonitoringService.get_fleet_alerts(
+            organization_id=g.current_org_id,
+            status=status,
+            severity=severity,
+            machine_id=machine_id,
+            limit=limit,
+        )
+        return jsonify({
+            "organization_id": g.current_org_id,
+            "count": len(alerts),
+            "alerts": alerts,
+        }), 200
+    except Exception as e:
+        logger.error(f"Error fetching fleet alerts: {e}")
+        return jsonify({"error": "Fleet Alerts Error", "message": str(e)}), 500
+
+
+@monitoring_bp.route("/monitoring/fleet/alerts/<alert_id>/acknowledge", methods=["POST"])
+@login_required
+def acknowledge_fleet_alert(alert_id: str):
+    """Acknowledge a plant-wide equipment alarm through authorized user action."""
+    from app.modules.monitoring.fleet_service import FleetMonitoringService
+    payload = request.get_json(silent=True) or {}
+    notes = payload.get("notes")
+    user_id = g.current_user.id if hasattr(g, "current_user") and g.current_user else None
+
+    try:
+        updated = FleetMonitoringService.acknowledge_alert(
+            organization_id=g.current_org_id,
+            alert_id=alert_id,
+            user_id=user_id or "system",
+            notes=notes,
+        )
+        return jsonify({
+            "message": "Alert acknowledged successfully.",
+            "alert": updated,
+        }), 200
+    except ValueError as ve:
+        return jsonify({"error": "Not Found", "message": str(ve)}), 404
+    except Exception as e:
+        logger.error(f"Error acknowledging fleet alert: {e}")
+        return jsonify({"error": "Internal Error", "message": str(e)}), 500
+
+
+
+# ==============================================================================
 # PHASE 3 STEP 3.1: STORAGE MONITORING & RETENTION ENDPOINTS
 # ==============================================================================
 

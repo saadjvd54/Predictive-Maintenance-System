@@ -80,7 +80,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const navLinks = [
     { label: 'Overview', href: '/dashboard', icon: LayoutDashboard },
     { label: 'Equipment', href: '/dashboard/equipment', icon: Cpu },
-    { label: 'Live Monitoring', href: '/dashboard/monitoring', icon: Activity, badge: 'Phase 5' },
+    { label: 'Live Monitoring', href: '/dashboard/monitoring', icon: Activity, badge: 'Live' },
     { label: 'Diagnostics', href: '/dashboard/diagnostics', icon: Sparkles, badge: 'Phase 6' },
     { label: 'Maintenance', href: '/dashboard/maintenance', icon: Wrench, badge: 'Phase 7' },
     { label: 'Factory Pilots', href: '/dashboard/pilots', icon: Shield, badge: 'Phase 9' },

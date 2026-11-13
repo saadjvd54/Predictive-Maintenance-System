@@ -507,6 +507,100 @@ export interface GatewayHealthResponse {
 }
 
 // =============================================================================
+// PHASE 3 STEP 3.3: PLANT-WIDE OBSERVABILITY & FLEET MONITORING TYPES
+// =============================================================================
+
+export type FleetEquipmentStatus =
+  | 'HEALTHY'
+  | 'WARNING'
+  | 'CRITICAL'
+  | 'OFFLINE'
+  | 'STALE'
+  | 'NOT CONFIGURED';
+
+export interface FleetOverviewResponse {
+  organization_id: string;
+  generated_at: string;
+  total_equipment: number;
+  monitoring_equipment: number;
+  healthy_equipment: number;
+  warning_equipment: number;
+  critical_equipment: number;
+  offline_equipment: number;
+  stale_equipment: number;
+  not_configured_equipment: number;
+  active_alerts_count: number;
+  critical_alerts_count: number;
+  warning_alerts_count: number;
+  simulator_flag: boolean;
+}
+
+export interface FleetThresholdBreach {
+  signal_id: string;
+  value: number;
+  unit?: string | null;
+  status: 'WARNING' | 'CRITICAL';
+}
+
+export interface FleetMachineItem {
+  id: string;
+  asset_code: string;
+  equipment_name: string;
+  category_id?: string | null;
+  equipment_type: string;
+  site_id?: string | null;
+  site_name: string;
+  location: string;
+  status: FleetEquipmentStatus;
+  monitoring_state: MonitoringState;
+  desired_state: MonitoringState;
+  is_actively_monitoring: boolean;
+  signals_count: number;
+  active_alerts_count: number;
+  highest_alert_severity?: 'CRITICAL' | 'WARNING' | null;
+  latest_telemetry_at?: string | null;
+  data_freshness: SignalFreshness;
+  telemetry_age_seconds?: number | null;
+  threshold_breaches: FleetThresholdBreach[];
+  created_at?: string | null;
+}
+
+export interface FleetMachinesResponse {
+  items: FleetMachineItem[];
+  total: number;
+  page: number;
+  per_page: number;
+  pages: number;
+  status_counts: Record<FleetEquipmentStatus, number>;
+  sites: Array<{ id: string; name: string; count: number }>;
+  categories: Array<{ id: string; name: string; count: number }>;
+}
+
+export interface FleetAlertItem {
+  id: string;
+  machine_id: string;
+  asset_code: string;
+  equipment_name: string;
+  site_name: string;
+  severity: 'WARNING' | 'CRITICAL' | 'INFO';
+  status: 'OPEN' | 'ACKNOWLEDGED' | 'UNDER_INVESTIGATION' | 'RESOLVED' | 'CLOSED';
+  signal_name: string;
+  observed_value?: number | null;
+  first_detected_at?: string | null;
+  last_detected_at?: string | null;
+  acknowledged_by?: string | null;
+  acknowledged_at?: string | null;
+  resolution_notes?: string | null;
+  anomaly_summary?: string | null;
+}
+
+export interface FleetAlertsResponse {
+  organization_id: string;
+  count: number;
+  alerts: FleetAlertItem[];
+}
+
+// =============================================================================
 // PHASE 5: CONDITION MONITORING, BASELINES & ANOMALY DETECTION TYPES
 // =============================================================================
 
@@ -1511,6 +1605,76 @@ class ApiClient {
    */
   async getStorageHealth(): Promise<ApiResponse<any>> {
     return this.request('/monitoring/storage/health');
+  }
+
+  // ===========================================================================
+  // PHASE 3 STEP 3.3: PLANT-WIDE OBSERVABILITY & FLEET MONITORING METHODS
+  // ===========================================================================
+
+  /**
+   * Get plant-wide fleet KPI overview (total, monitoring, healthy, warning, critical, offline, stale, alarms).
+   */
+  async getFleetOverview(): Promise<ApiResponse<FleetOverviewResponse>> {
+    return this.request('/monitoring/fleet/overview');
+  }
+
+  /**
+   * Get searchable, filterable, and paginated equipment fleet monitoring list.
+   */
+  async getFleetMachines(options?: {
+    site_id?: string;
+    category_id?: string;
+    status?: string;
+    search?: string;
+    sort_by?: string;
+    order?: 'asc' | 'desc';
+    page?: number;
+    per_page?: number;
+  }): Promise<ApiResponse<FleetMachinesResponse>> {
+    const params = new URLSearchParams();
+    if (options?.site_id) params.set('site_id', options.site_id);
+    if (options?.category_id) params.set('category_id', options.category_id);
+    if (options?.status) params.set('status', options.status);
+    if (options?.search) params.set('search', options.search);
+    if (options?.sort_by) params.set('sort_by', options.sort_by);
+    if (options?.order) params.set('order', options.order);
+    if (options?.page) params.set('page', String(options.page));
+    if (options?.per_page) params.set('per_page', String(options.per_page));
+
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return this.request(`/monitoring/fleet${qs}`);
+  }
+
+  /**
+   * Get centralized plant-wide equipment alerts.
+   */
+  async getFleetAlerts(options?: {
+    status?: string;
+    severity?: string;
+    machine_id?: string;
+    limit?: number;
+  }): Promise<ApiResponse<FleetAlertsResponse>> {
+    const params = new URLSearchParams();
+    if (options?.status) params.set('status', options.status);
+    if (options?.severity) params.set('severity', options.severity);
+    if (options?.machine_id) params.set('machine_id', options.machine_id);
+    if (options?.limit) params.set('limit', String(options.limit));
+
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return this.request(`/monitoring/fleet/alerts${qs}`);
+  }
+
+  /**
+   * Acknowledge a fleet alarm through authorized user action.
+   */
+  async acknowledgeFleetAlert(
+    alertId: string,
+    notes?: string
+  ): Promise<ApiResponse<{ message: string; alert: any }>> {
+    return this.request(`/monitoring/fleet/alerts/${alertId}/acknowledge`, {
+      method: 'POST',
+      body: JSON.stringify({ notes }),
+    });
   }
 
   /**
