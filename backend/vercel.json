@@ -1,15 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/api/index.py"
-    }
-  ],
+  "framework": "flask",
   "functions": {
-    "api/index.py": {
+    "index.py": {
       "maxDuration": 300
     }
   }
 }
-
