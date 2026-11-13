@@ -162,6 +162,9 @@ def get_historical_readings(machine_id: str):
         return jsonify({"error": "Not Found", "message": "Equipment not found or access denied."}), 404
 
     signal_id = request.args.get("signal_id")
+    raw_sig_ids = request.args.get("signal_ids")
+    signal_ids = [s.strip() for s in raw_sig_ids.split(",") if s.strip()] if raw_sig_ids else None
+
     start_str = request.args.get("start_time")
     end_str = request.args.get("end_time")
     limit = int(request.args.get("limit", 200))
@@ -180,14 +183,18 @@ def get_historical_readings(machine_id: str):
         except ValueError:
             logger.warning(f"Invalid end_time format: {end_str}")
 
-    # Phase 3 Step 3.1: Support downsample policy, bucket_seconds, and window
+    # Phase 3 Step 3.1 & 3.2: Support downsample policy, bucket_seconds, and multi-signal querying
     downsample_arg = request.args.get("downsample", "auto")
     bucket_seconds = request.args.get("bucket_seconds", type=int)
+
+    from app.modules.monitoring.threshold_service import ThresholdService
+    thresholds = ThresholdService.get_thresholds_for_machine(machine_id, g.current_org_id)
 
     readings = IngestionService.get_historical_readings(
         machine_id=machine_id,
         organization_id=g.current_org_id,
         signal_id=signal_id,
+        signal_ids=signal_ids,
         start_time=start_dt,
         end_time=end_dt,
         limit=limit,
@@ -199,9 +206,141 @@ def get_historical_readings(machine_id: str):
         "machine_id": machine_id,
         "count": len(readings),
         "readings": readings,
+        "thresholds": thresholds,
         "downsampled": bool(readings and readings[0].get("downsampled")),
         "simulator_flag": True,
     }), 200
+
+
+# ==============================================================================
+# PHASE 3 STEP 3.2: THRESHOLD VISUALIZATION & TELEMETRY EXPORT ENDPOINTS
+# ==============================================================================
+
+@monitoring_bp.route("/equipment/<machine_id>/signals/thresholds", methods=["GET"])
+@login_required
+def get_equipment_thresholds(machine_id: str):
+    """Retrieve warning and critical threshold envelopes for equipment signals."""
+    machine = db.session.get(Machine, machine_id)
+    if not machine or machine.organization_id != g.current_org_id:
+        return jsonify({"error": "Not Found", "message": "Equipment not found or access denied."}), 404
+
+    from app.modules.monitoring.threshold_service import ThresholdService
+    thresholds = ThresholdService.get_thresholds_for_machine(machine_id, g.current_org_id)
+    return jsonify({
+        "machine_id": machine_id,
+        "organization_id": g.current_org_id,
+        "thresholds": thresholds,
+    }), 200
+
+
+@monitoring_bp.route("/equipment/<machine_id>/signals/<signal_id>/thresholds", methods=["POST"])
+@login_required
+@roles_required(*MONITORING_MANAGE_ROLES)
+def set_signal_threshold(machine_id: str, signal_id: str):
+    """Configure or update warning and critical operational thresholds for a signal."""
+    machine = db.session.get(Machine, machine_id)
+    if not machine or machine.organization_id != g.current_org_id:
+        return jsonify({"error": "Not Found", "message": "Equipment not found or access denied."}), 404
+
+    payload = request.get_json(silent=True) or {}
+    warning_min = payload.get("warning_min")
+    warning_max = payload.get("warning_max")
+    critical_min = payload.get("critical_min")
+    critical_max = payload.get("critical_max")
+    unit = payload.get("unit")
+    notes = payload.get("notes")
+    is_active = bool(payload.get("is_active", True))
+
+    user_id = g.current_user.id if hasattr(g, "current_user") and g.current_user else None
+
+    from app.modules.monitoring.threshold_service import ThresholdService
+    try:
+        thresh = ThresholdService.set_signal_threshold(
+            organization_id=g.current_org_id,
+            machine_id=machine_id,
+            signal_id=signal_id,
+            warning_min=float(warning_min) if warning_min is not None else None,
+            warning_max=float(warning_max) if warning_max is not None else None,
+            critical_min=float(critical_min) if critical_min is not None else None,
+            critical_max=float(critical_max) if critical_max is not None else None,
+            unit=unit,
+            notes=notes,
+            is_active=is_active,
+            user_id=user_id,
+        )
+        return jsonify({
+            "message": "Signal threshold saved successfully.",
+            "threshold": thresh.to_dict(),
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": "Bad Request", "message": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error saving signal threshold: {e}")
+        return jsonify({"error": "Internal Error", "message": str(e)}), 500
+
+
+@monitoring_bp.route("/equipment/<machine_id>/readings/export", methods=["GET"])
+@login_required
+def export_historical_telemetry(machine_id: str):
+    """Export bounded historical telemetry dataset in CSV or JSON format with thresholds & quality codes."""
+    machine = db.session.get(Machine, machine_id)
+    if not machine or machine.organization_id != g.current_org_id:
+        return jsonify({"error": "Not Found", "message": "Equipment not found or access denied."}), 404
+
+    format_type = request.args.get("format", "csv").lower()
+    raw_sig_ids = request.args.get("signal_ids")
+    signal_ids = [s.strip() for s in raw_sig_ids.split(",") if s.strip()] if raw_sig_ids else None
+
+    start_str = request.args.get("start_time")
+    end_str = request.args.get("end_time")
+    limit = int(request.args.get("limit", 10000))
+
+    start_dt = None
+    if start_str:
+        try:
+            start_dt = datetime.fromisoformat(start_str.strip().replace(" ", "+").replace("Z", "+00:00"))
+        except ValueError:
+            logger.warning(f"Invalid start_time format: {start_str}")
+
+    end_dt = None
+    if end_str:
+        try:
+            end_dt = datetime.fromisoformat(end_str.strip().replace(" ", "+").replace("Z", "+00:00"))
+        except ValueError:
+            logger.warning(f"Invalid end_time format: {end_str}")
+
+    from app.modules.monitoring.export_service import TelemetryExportService
+    try:
+        export_result = TelemetryExportService.export_telemetry(
+            organization_id=g.current_org_id,
+            machine_id=machine_id,
+            signal_ids=signal_ids,
+            start_time=start_dt,
+            end_time=end_dt,
+            format_type=format_type,
+            limit=limit,
+        )
+
+        if format_type == "json":
+            return jsonify(export_result["data"]), 200
+
+        # CSV response with attachment header
+        from flask import Response
+        return Response(
+            export_result["data"],
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=\"{export_result['filename']}\"",
+                "Content-Type": "text/csv; charset=utf-8",
+                "X-Record-Count": str(export_result["record_count"]),
+            },
+        )
+    except PermissionError as pe:
+        return jsonify({"error": "Forbidden", "message": str(pe)}), 403
+    except Exception as e:
+        logger.error(f"Error exporting telemetry: {e}")
+        return jsonify({"error": "Export Error", "message": str(e)}), 500
+
 
 
 # ==============================================================================

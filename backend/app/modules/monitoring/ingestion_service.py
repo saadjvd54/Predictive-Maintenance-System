@@ -263,23 +263,35 @@ class IngestionService:
         machine_id: str,
         organization_id: str,
         signal_id: Optional[str] = None,
+        signal_ids: Optional[List[str]] = None,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         limit: int = 200,
         downsample: Optional[Any] = "auto",
         bucket_seconds: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Retrieve bounded historical time-series readings with time-aware downsampling.
+        """Retrieve bounded historical time-series readings with time-aware downsampling and multi-signal support.
         
-        Phase 3 Step 3.1:
-        - Replaces the first-1000-record limitation with time-range-aware downsampling.
-        - Supports 15m, 1h, 6h, 24h and arbitrary windows spanning the ENTIRE requested period.
-        - Computes minimum, maximum, and average values per bucket.
+        Phase 3 Step 3.2:
+        - Multi-signal overlay support: Query single or multiple signal IDs simultaneously.
+        - Replaces first-1000-record limitation with time-range-aware downsampling across full range.
+        - Evaluates operational thresholds per reading point (NORMAL, WARNING, CRITICAL).
         - Merges historical aggregates from signal_reading_aggregates for long ranges.
         - Preserves 100% backward compatibility with existing frontend charts and APIs.
         """
         now = datetime.now(timezone.utc)
-        effective_limit = max(10, min(1000, int(limit)))
+        effective_limit = max(10, min(2000, int(limit)))
+
+        # Resolve effective signal IDs
+        effective_sig_ids: List[str] = []
+        if signal_ids:
+            effective_sig_ids = [s for s in signal_ids if s]
+        elif signal_id:
+            effective_sig_ids = [signal_id]
+
+        # Retrieve threshold mapping for active signals
+        from app.modules.monitoring.threshold_service import ThresholdService
+        threshold_map = ThresholdService.get_thresholds_for_machine(machine_id, organization_id)
 
         # Normalize timezone awareness
         if end_time is not None:
@@ -308,7 +320,6 @@ class IngestionService:
             elif downsample_lower in ("false", "0", "no"):
                 should_downsample = False
             else:
-                # "auto": downsample if duration > 15 minutes or bucket_seconds specified
                 should_downsample = (duration_seconds > 900) or (bucket_seconds is not None)
         elif isinstance(downsample, bool):
             should_downsample = downsample
@@ -321,17 +332,24 @@ class IngestionService:
                 machine_id=machine_id,
                 organization_id=organization_id,
             )
-            if signal_id:
-                query = query.filter_by(signal_id=signal_id)
+            if effective_sig_ids:
+                query = query.filter(SignalReading.signal_id.in_(effective_sig_ids))
             query = query.filter(
                 SignalReading.source_timestamp >= start_time,
                 SignalReading.source_timestamp <= end_time,
             )
             readings = query.order_by(SignalReading.source_timestamp.asc()).limit(effective_limit).all()
-            return [r.to_dict() for r in readings]
+            output = []
+            for r in readings:
+                d = r.to_dict()
+                sig_t = threshold_map.get(r.signal_id, {})
+                d["threshold_status"] = ThresholdService.evaluate_value(r.normalized_value, sig_t)
+                d["threshold_info"] = sig_t
+                output.append(d)
+            return output
 
         # Downsampled path: compute representative points across full range
-        calc_bucket_seconds = bucket_seconds or max(1, int(duration_seconds / effective_limit))
+        calc_bucket_seconds = bucket_seconds or max(1, int(duration_seconds / (effective_limit / max(1, len(effective_sig_ids) or 1))))
         try:
             dialect_name = db.engine.dialect.name
         except Exception:
@@ -339,8 +357,9 @@ class IngestionService:
 
         results: List[Dict[str, Any]] = []
 
-        if dialect_name == "postgresql":
-            # Native PostgreSQL high-performance bucketed query
+        if dialect_name == "postgresql" and len(effective_sig_ids) <= 1:
+            # Native PostgreSQL high-performance bucketed query for single signal
+            target_sig = effective_sig_ids[0] if effective_sig_ids else None
             try:
                 from sqlalchemy import text as sa_text
                 sql = sa_text("""
@@ -367,7 +386,7 @@ class IngestionService:
                     "bucket_secs": calc_bucket_seconds,
                     "machine_id": machine_id,
                     "org_id": organization_id,
-                    "sig_id": signal_id,
+                    "sig_id": target_sig,
                     "start_ts": start_time,
                     "end_ts": end_time,
                     "limit_val": effective_limit,
@@ -377,18 +396,23 @@ class IngestionService:
                     bts = row[0]
                     if bts and bts.tzinfo is None:
                         bts = bts.replace(tzinfo=timezone.utc)
+                    s_id = row[7] or target_sig
+                    sig_t = threshold_map.get(s_id, {})
+                    avg_v = float(row[3]) if row[3] is not None else None
                     results.append({
                         "source_timestamp": bts.isoformat() if bts else None,
-                        "normalized_value": round(float(row[3]), 4) if row[3] is not None else None,
+                        "normalized_value": round(avg_v, 4) if avg_v is not None else None,
                         "min_value": round(float(row[1]), 4) if row[1] is not None else None,
                         "max_value": round(float(row[2]), 4) if row[2] is not None else None,
-                        "avg_value": round(float(row[3]), 4) if row[3] is not None else None,
+                        "avg_value": round(avg_v, 4) if avg_v is not None else None,
                         "reading_count": int(row[4]),
                         "normalized_unit": row[5] or "",
                         "quality_code": row[6] or "Good",
-                        "signal_id": row[7] or signal_id,
+                        "signal_id": s_id,
                         "machine_id": machine_id,
                         "organization_id": organization_id,
+                        "threshold_status": ThresholdService.evaluate_value(avg_v, sig_t),
+                        "threshold_info": sig_t,
                         "downsampled": True,
                         "bucket_seconds": calc_bucket_seconds,
                     })
@@ -396,9 +420,8 @@ class IngestionService:
                 logger.warning(f"[IngestionService] PostgreSQL downsampling query fallback: {e}")
                 results = []
 
-        # If SQLite dialect or PostgreSQL query returned 0 rows / fallback
+        # If SQLite dialect or multi-signal or PostgreSQL query fallback
         if not results:
-            # Query column tuples directly to bypass full ORM object hydration overhead (10x faster)
             query = db.session.query(
                 SignalReading.source_timestamp,
                 SignalReading.normalized_value,
@@ -411,8 +434,8 @@ class IngestionService:
                 SignalReading.machine_id == machine_id,
                 SignalReading.organization_id == organization_id,
             )
-            if signal_id:
-                query = query.filter(SignalReading.signal_id == signal_id)
+            if effective_sig_ids:
+                query = query.filter(SignalReading.signal_id.in_(effective_sig_ids))
             query = query.filter(
                 SignalReading.source_timestamp >= start_time,
                 SignalReading.source_timestamp <= end_time,
@@ -420,21 +443,23 @@ class IngestionService:
 
             raw_tuples = query.all()
             if raw_tuples:
-                # Group by bucket index
-                bucket_map: Dict[int, List[Any]] = {}
+                # Group by (bucket_index, signal_id) to separate signals cleanly
+                bucket_map: Dict[Tuple[int, str], List[Any]] = {}
                 start_epoch = start_time.timestamp()
 
                 for row in raw_tuples:
                     ts = row[0]
                     if ts.tzinfo is None:
                         ts = ts.replace(tzinfo=timezone.utc)
+                    s_id = row[4]
                     b_idx = int((ts.timestamp() - start_epoch) // calc_bucket_seconds)
-                    if b_idx not in bucket_map:
-                        bucket_map[b_idx] = []
-                    bucket_map[b_idx].append(row)
+                    key = (b_idx, s_id)
+                    if key not in bucket_map:
+                        bucket_map[key] = []
+                    bucket_map[key].append(row)
 
-                for b_idx in sorted(bucket_map.keys()):
-                    items = bucket_map[b_idx]
+                for (b_idx, s_id) in sorted(bucket_map.keys(), key=lambda k: (k[0], k[1])):
+                    items = bucket_map[(b_idx, s_id)]
                     bucket_start_ts = datetime.fromtimestamp(
                         start_epoch + (b_idx * calc_bucket_seconds),
                         tz=timezone.utc
@@ -444,6 +469,7 @@ class IngestionService:
                     max_v = max(vals) if vals else None
                     avg_v = (sum(vals) / len(vals)) if vals else None
 
+                    sig_t = threshold_map.get(s_id, {})
                     results.append({
                         "source_timestamp": bucket_start_ts.isoformat(),
                         "normalized_value": round(avg_v, 4) if avg_v is not None else None,
@@ -453,9 +479,11 @@ class IngestionService:
                         "reading_count": len(items),
                         "normalized_unit": items[0][2] or "",
                         "quality_code": "Good" if all(x[3] == "Good" for x in items) else "Mixed",
-                        "signal_id": items[0][4],
-                        "machine_id": items[0][5],
-                        "organization_id": items[0][6],
+                        "signal_id": s_id,
+                        "machine_id": machine_id,
+                        "organization_id": organization_id,
+                        "threshold_status": ThresholdService.evaluate_value(avg_v, sig_t),
+                        "threshold_info": sig_t,
                         "downsampled": True,
                         "bucket_seconds": calc_bucket_seconds,
                     })
@@ -468,8 +496,8 @@ class IngestionService:
             machine_id=machine_id,
             organization_id=organization_id,
         )
-        if signal_id:
-            agg_query = agg_query.filter_by(signal_id=signal_id)
+        if effective_sig_ids:
+            agg_query = agg_query.filter(SignalReadingAggregate.signal_id.in_(effective_sig_ids))
         agg_query = agg_query.filter(
             SignalReadingAggregate.bucket_start >= start_time,
             SignalReadingAggregate.bucket_start <= end_time,
@@ -477,10 +505,12 @@ class IngestionService:
         archived_aggs = agg_query.order_by(SignalReadingAggregate.bucket_start.asc()).all()
 
         if archived_aggs:
-            existing_ts_set = {r["source_timestamp"] for r in results if r.get("source_timestamp")}
+            existing_ts_set = {(r["source_timestamp"], r["signal_id"]) for r in results if r.get("source_timestamp")}
             for a in archived_aggs:
                 iso_ts = a.bucket_start.isoformat() if a.bucket_start else None
-                if iso_ts and iso_ts not in existing_ts_set:
+                key = (iso_ts, a.signal_id)
+                if iso_ts and key not in existing_ts_set:
+                    sig_t = threshold_map.get(a.signal_id, {})
                     results.append({
                         "source_timestamp": iso_ts,
                         "normalized_value": round(a.avg_value, 4) if a.avg_value is not None else None,
@@ -493,14 +523,16 @@ class IngestionService:
                         "signal_id": a.signal_id,
                         "machine_id": machine_id,
                         "organization_id": organization_id,
+                        "threshold_status": ThresholdService.evaluate_value(a.avg_value, sig_t),
+                        "threshold_info": sig_t,
                         "downsampled": True,
                         "archived": True,
                         "bucket_seconds": 3600,
                     })
 
-            # Sort merged results by timestamp
-            results.sort(key=lambda x: x.get("source_timestamp") or "")
+            results.sort(key=lambda x: (x.get("source_timestamp") or "", x.get("signal_id") or ""))
 
         return results[:effective_limit]
+
 
 

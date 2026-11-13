@@ -432,6 +432,12 @@ export interface SignalReadingItem {
   freshness: SignalFreshness;
   age_seconds?: number;
   simulator_flag?: boolean;
+  threshold_status?: 'NORMAL' | 'WARNING' | 'CRITICAL' | 'UNCONFIGURED';
+  min_value?: number | null;
+  max_value?: number | null;
+  avg_value?: number | null;
+  sample_count?: number;
+  downsampled?: boolean;
 }
 
 export interface MonitoringStatusResponse {
@@ -453,10 +459,34 @@ export interface MonitoringStatusResponse {
   simulator_flag: boolean;
 }
 
+export interface SignalThresholdItem {
+  id?: string;
+  signal_id: string;
+  signal_name?: string;
+  machine_id?: string;
+  warning_min?: number | null;
+  warning_max?: number | null;
+  critical_min?: number | null;
+  critical_max?: number | null;
+  unit?: string | null;
+  notes?: string | null;
+  is_active?: boolean;
+  configured: boolean;
+  source?: 'signal_thresholds' | 'baseline_expected' | 'unconfigured';
+}
+
+export interface EquipmentThresholdsResponse {
+  machine_id: string;
+  organization_id?: string;
+  thresholds: Record<string, SignalThresholdItem>;
+}
+
 export interface HistoricalReadingsResponse {
   machine_id: string;
   count: number;
   readings: SignalReadingItem[];
+  thresholds?: Record<string, SignalThresholdItem>;
+  downsampled?: boolean;
   simulator_flag: boolean;
 }
 
@@ -1343,12 +1373,13 @@ class ApiClient {
   }
 
   /**
-   * Get historical time-series readings for trending charts with optional downsampling.
+   * Get historical time-series readings for trending charts with optional downsampling and multi-signal filtering.
    */
   async getHistoricalReadings(
     machineId: string,
     options?: {
       signal_id?: string;
+      signal_ids?: string[];
       start_time?: string;
       end_time?: string;
       limit?: number;
@@ -1358,6 +1389,9 @@ class ApiClient {
   ): Promise<ApiResponse<HistoricalReadingsResponse>> {
     const params = new URLSearchParams();
     if (options?.signal_id) params.set('signal_id', options.signal_id);
+    if (options?.signal_ids && options.signal_ids.length > 0) {
+      params.set('signal_ids', options.signal_ids.join(','));
+    }
     if (options?.start_time) params.set('start_time', options.start_time);
     if (options?.end_time) params.set('end_time', options.end_time);
     if (options?.limit) params.set('limit', String(options.limit));
@@ -1366,6 +1400,110 @@ class ApiClient {
 
     const qs = params.toString() ? `?${params.toString()}` : '';
     return this.request(`/equipment/${machineId}/readings/history${qs}`);
+  }
+
+  /**
+   * Get configured warning and critical thresholds for an equipment asset.
+   */
+  async getEquipmentThresholds(
+    machineId: string
+  ): Promise<ApiResponse<EquipmentThresholdsResponse>> {
+    return this.request(`/equipment/${machineId}/signals/thresholds`);
+  }
+
+  /**
+   * Set or update operational warning/critical thresholds for an equipment signal.
+   */
+  async setSignalThreshold(
+    machineId: string,
+    signalId: string,
+    payload: {
+      warning_min?: number | null;
+      warning_max?: number | null;
+      critical_min?: number | null;
+      critical_max?: number | null;
+      unit?: string | null;
+      notes?: string | null;
+      is_active?: boolean;
+    }
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/equipment/${machineId}/signals/${signalId}/thresholds`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * Get URL for historical telemetry export with filters.
+   */
+  getTelemetryExportUrl(
+    machineId: string,
+    options?: {
+      format?: 'csv' | 'json';
+      signal_ids?: string[];
+      start_time?: string;
+      end_time?: string;
+      limit?: number;
+    }
+  ): string {
+    const params = new URLSearchParams();
+    if (options?.format) params.set('format', options.format);
+    if (options?.signal_ids && options.signal_ids.length > 0) {
+      params.set('signal_ids', options.signal_ids.join(','));
+    }
+    if (options?.start_time) params.set('start_time', options.start_time);
+    if (options?.end_time) params.set('end_time', options.end_time);
+    if (options?.limit) params.set('limit', String(options.limit));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return `${this.baseUrl}/equipment/${machineId}/readings/export${qs}`;
+  }
+
+  /**
+   * Export historical telemetry in CSV or JSON format.
+   */
+  async exportTelemetry(
+    machineId: string,
+    options?: {
+      format?: 'csv' | 'json';
+      signal_ids?: string[];
+      start_time?: string;
+      end_time?: string;
+      limit?: number;
+    }
+  ): Promise<{ data?: string | any; filename?: string; error?: string }> {
+    const format = options?.format || 'csv';
+    const url = this.getTelemetryExportUrl(machineId, options);
+    try {
+      const headers: Record<string, string> = {};
+      if (typeof window !== 'undefined') {
+        const storedToken = localStorage.getItem('pharma_session_token');
+        if (storedToken) {
+          headers['Authorization'] = `Bearer ${storedToken}`;
+        }
+      }
+
+      const res = await fetch(url, { headers, credentials: 'include' });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        return { error: (errJson as any).message || `Export failed: ${res.statusText}` };
+      }
+
+      if (format === 'json') {
+        const json = await res.json();
+        return { data: json, filename: `telemetry_${machineId}.json` };
+      } else {
+        const text = await res.text();
+        const disposition = res.headers.get('content-disposition');
+        let filename = `telemetry_${machineId}.csv`;
+        if (disposition && disposition.includes('filename=')) {
+          const match = disposition.match(/filename="?([^"]+)"?/);
+          if (match && match[1]) filename = match[1];
+        }
+        return { data: text, filename };
+      }
+    } catch (err: any) {
+      return { error: err.message || 'Export failed' };
+    }
   }
 
   /**

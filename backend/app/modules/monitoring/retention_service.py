@@ -258,12 +258,16 @@ class RetentionService:
                 batch_idx += 1
 
                 # Update progress on execution log
-                execution.records_deleted = deleted_count
-                execution.batch_count = batch_idx
+                RetentionExecution.query.filter_by(id=execution.id).update({
+                    "records_deleted": deleted_count,
+                    "batch_count": batch_idx,
+                })
                 db.session.commit()
 
-            execution.completed_at = datetime.now(timezone.utc)
-            execution.status = "COMPLETED"
+            RetentionExecution.query.filter_by(id=execution.id).update({
+                "completed_at": datetime.now(timezone.utc),
+                "status": "COMPLETED",
+            })
             db.session.commit()
 
             return {
@@ -281,10 +285,15 @@ class RetentionService:
         except Exception as e:
             logger.error(f"[RetentionService] Error during retention execution: {e}")
             db.session.rollback()
-            execution.completed_at = datetime.now(timezone.utc)
-            execution.status = "FAILED"
-            execution.error_message = str(e)
-            db.session.commit()
+            try:
+                RetentionExecution.query.filter_by(id=execution.id).update({
+                    "completed_at": datetime.now(timezone.utc),
+                    "status": "FAILED",
+                    "error_message": str(e),
+                })
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
             raise
 
     @classmethod

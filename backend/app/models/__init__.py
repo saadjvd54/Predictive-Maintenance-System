@@ -32,6 +32,7 @@ from app.models.monitoring import (
     RetentionPolicy,
     RetentionExecution,
     SignalReadingAggregate,
+    SignalThreshold,
 )
 from app.models.condition import (
     QualityState,

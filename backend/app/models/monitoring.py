@@ -455,3 +455,80 @@ class SignalReadingAggregate(db.Model):
         }
 
 
+# ==============================================================================
+# PHASE 3 STEP 3.2: SIGNAL OPERATIONAL THRESHOLDS MODEL
+# ==============================================================================
+
+class SignalThreshold(db.Model):
+    """Configurable operational warning and critical threshold envelopes for equipment signals.
+    
+    Visualization thresholds allow operators to detect process drift.
+    Note: Must not be confused with or substituted for validated pharmaceutical process limits (CQA/CPP).
+    """
+    __tablename__ = "signal_thresholds"
+    __table_args__ = (
+        db.UniqueConstraint("signal_id", name="uq_signal_thresholds_signal_id"),
+        db.Index("ix_thresholds_mach_sig", "machine_id", "signal_id"),
+    )
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id = db.Column(
+        db.String(36),
+        db.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    machine_id = db.Column(
+        db.String(36),
+        db.ForeignKey("machines.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    signal_id = db.Column(
+        db.String(36),
+        db.ForeignKey("machine_signals.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+
+    # Threshold bounds
+    warning_min = db.Column(db.Float, nullable=True)   # Lower Warning Limit (LWL)
+    warning_max = db.Column(db.Float, nullable=True)   # Upper Warning Limit (UWL)
+    critical_min = db.Column(db.Float, nullable=True)  # Lower Critical Limit (LCL)
+    critical_max = db.Column(db.Float, nullable=True)  # Upper Critical Limit (UCL)
+
+    unit = db.Column(db.String(50), nullable=True)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    notes = db.Column(db.Text, nullable=True)
+
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+    created_by_user_id = db.Column(db.String(36), nullable=True)
+
+    signal = db.relationship("MachineSignal")
+    machine = db.relationship("Machine")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "organization_id": self.organization_id,
+            "machine_id": self.machine_id,
+            "signal_id": self.signal_id,
+            "warning_min": self.warning_min,
+            "warning_max": self.warning_max,
+            "critical_min": self.critical_min,
+            "critical_max": self.critical_max,
+            "unit": self.unit,
+            "is_active": self.is_active,
+            "notes": self.notes,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+
