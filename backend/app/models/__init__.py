@@ -29,6 +29,9 @@ from app.models.monitoring import (
     GatewayHealthRecord,
     IngestionBatch,
     SignalReading,
+    RetentionPolicy,
+    RetentionExecution,
+    SignalReadingAggregate,
 )
 from app.models.condition import (
     QualityState,

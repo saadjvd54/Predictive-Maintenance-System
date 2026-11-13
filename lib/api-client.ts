@@ -1343,20 +1343,73 @@ class ApiClient {
   }
 
   /**
-   * Get historical time-series readings for trending charts.
+   * Get historical time-series readings for trending charts with optional downsampling.
    */
   async getHistoricalReadings(
     machineId: string,
-    options?: { signal_id?: string; start_time?: string; end_time?: string; limit?: number }
+    options?: {
+      signal_id?: string;
+      start_time?: string;
+      end_time?: string;
+      limit?: number;
+      downsample?: boolean | string;
+      bucket_seconds?: number;
+    }
   ): Promise<ApiResponse<HistoricalReadingsResponse>> {
     const params = new URLSearchParams();
     if (options?.signal_id) params.set('signal_id', options.signal_id);
     if (options?.start_time) params.set('start_time', options.start_time);
     if (options?.end_time) params.set('end_time', options.end_time);
     if (options?.limit) params.set('limit', String(options.limit));
+    if (options?.downsample !== undefined) params.set('downsample', String(options.downsample));
+    if (options?.bucket_seconds !== undefined) params.set('bucket_seconds', String(options.bucket_seconds));
 
     const qs = params.toString() ? `?${params.toString()}` : '';
     return this.request(`/equipment/${machineId}/readings/history${qs}`);
+  }
+
+  /**
+   * Get storage health, telemetry volume and growth rates.
+   */
+  async getStorageHealth(): Promise<ApiResponse<any>> {
+    return this.request('/monitoring/storage/health');
+  }
+
+  /**
+   * Get effective telemetry retention policy for an equipment asset.
+   */
+  async getRetentionPolicy(machineId: string): Promise<ApiResponse<any>> {
+    return this.request(`/equipment/${machineId}/retention/policy`);
+  }
+
+  /**
+   * Set or update telemetry retention policy for an equipment asset.
+   */
+  async setRetentionPolicy(machineId: string, policy: any): Promise<ApiResponse<any>> {
+    return this.request(`/equipment/${machineId}/retention/policy`, {
+      method: 'POST',
+      body: JSON.stringify(policy),
+    });
+  }
+
+  /**
+   * Execute retention cycle (supports dry_run preview).
+   */
+  async executeRetentionJob(
+    machineId: string,
+    options?: { dry_run?: boolean; batch_size?: number; max_batches?: number }
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/equipment/${machineId}/retention/execute`, {
+      method: 'POST',
+      body: JSON.stringify(options || {}),
+    });
+  }
+
+  /**
+   * Get retention execution audit history for an equipment asset.
+   */
+  async getRetentionHistory(machineId: string, limit: number = 20): Promise<ApiResponse<any>> {
+    return this.request(`/equipment/${machineId}/retention/history?limit=${limit}`);
   }
 
   /**

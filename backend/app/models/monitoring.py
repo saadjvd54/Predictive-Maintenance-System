@@ -291,3 +291,167 @@ class SignalReading(db.Model):
             "simulator_flag": self.simulator_flag,
         }
 
+
+# ==============================================================================
+# PHASE 3 STEP 3.1: RETENTION, AGGREGATION & STORAGE AUDITING MODELS
+# ==============================================================================
+
+class RetentionPolicy(db.Model):
+    """Configurable telemetry retention policy per organization or machine.
+    
+    Default behavior: If no active policy exists, NO telemetry deletion is performed.
+    """
+    __tablename__ = "retention_policies"
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id = db.Column(
+        db.String(36),
+        db.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    machine_id = db.Column(
+        db.String(36),
+        db.ForeignKey("machines.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True
+    )
+    raw_retention_days = db.Column(db.Integer, nullable=False, default=90)
+    aggregate_retention_days = db.Column(db.Integer, nullable=False, default=365)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    archive_before_delete = db.Column(db.Boolean, default=True, nullable=False)
+    batch_size = db.Column(db.Integer, default=500, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+    created_by_user_id = db.Column(db.String(36), nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "organization_id": self.organization_id,
+            "machine_id": self.machine_id,
+            "raw_retention_days": self.raw_retention_days,
+            "aggregate_retention_days": self.aggregate_retention_days,
+            "is_active": self.is_active,
+            "archive_before_delete": self.archive_before_delete,
+            "batch_size": self.batch_size,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "created_by_user_id": self.created_by_user_id,
+        }
+
+
+class RetentionExecution(db.Model):
+    """Audit record of retention job executions, tracking records scanned, aggregated, deleted, and duration."""
+    __tablename__ = "retention_executions"
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    policy_id = db.Column(
+        db.String(36),
+        db.ForeignKey("retention_policies.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True
+    )
+    organization_id = db.Column(db.String(36), nullable=False, index=True)
+    machine_id = db.Column(db.String(36), nullable=True, index=True)
+    started_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    dry_run = db.Column(db.Boolean, default=False, nullable=False)
+    cutoff_timestamp = db.Column(db.DateTime(timezone=True), nullable=False)
+    records_scanned = db.Column(db.Integer, default=0, nullable=False)
+    records_aggregated = db.Column(db.Integer, default=0, nullable=False)
+    records_deleted = db.Column(db.Integer, default=0, nullable=False)
+    batch_count = db.Column(db.Integer, default=0, nullable=False)
+    status = db.Column(db.String(50), default="IN_PROGRESS", nullable=False)
+    error_message = db.Column(db.Text, nullable=True)
+    executed_by = db.Column(db.String(100), default="SYSTEM", nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "policy_id": self.policy_id,
+            "organization_id": self.organization_id,
+            "machine_id": self.machine_id,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "dry_run": self.dry_run,
+            "cutoff_timestamp": self.cutoff_timestamp.isoformat() if self.cutoff_timestamp else None,
+            "records_scanned": self.records_scanned,
+            "records_aggregated": self.records_aggregated,
+            "records_deleted": self.records_deleted,
+            "batch_count": self.batch_count,
+            "status": self.status,
+            "error_message": self.error_message,
+            "executed_by": self.executed_by,
+        }
+
+
+class SignalReadingAggregate(db.Model):
+    """Historical aggregate rollups (e.g. hourly buckets) preserved before raw telemetry pruning."""
+    __tablename__ = "signal_reading_aggregates"
+    __table_args__ = (
+        db.Index("ix_agg_machine_bucket", "machine_id", "bucket_start"),
+        db.Index("ix_agg_signal_bucket", "signal_id", "bucket_start"),
+        db.UniqueConstraint("signal_id", "bucket_start", "bucket_resolution", name="uq_signal_bucket_resolution"),
+    )
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    organization_id = db.Column(
+        db.String(36),
+        db.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    machine_id = db.Column(
+        db.String(36),
+        db.ForeignKey("machines.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    signal_id = db.Column(
+        db.String(36),
+        db.ForeignKey("machine_signals.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    bucket_start = db.Column(db.DateTime(timezone=True), nullable=False, index=True)
+    bucket_end = db.Column(db.DateTime(timezone=True), nullable=False)
+    bucket_resolution = db.Column(db.String(20), default="1h", nullable=False)
+
+    min_value = db.Column(db.Float, nullable=True)
+    max_value = db.Column(db.Float, nullable=True)
+    avg_value = db.Column(db.Float, nullable=True)
+    first_value = db.Column(db.Float, nullable=True)
+    last_value = db.Column(db.Float, nullable=True)
+    reading_count = db.Column(db.Integer, default=0, nullable=False)
+    quality_summary = db.Column(db.String(50), default="Good", nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    signal = db.relationship("MachineSignal")
+    machine = db.relationship("Machine")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "organization_id": self.organization_id,
+            "machine_id": self.machine_id,
+            "signal_id": self.signal_id,
+            "bucket_start": self.bucket_start.isoformat() if self.bucket_start else None,
+            "bucket_end": self.bucket_end.isoformat() if self.bucket_end else None,
+            "bucket_resolution": self.bucket_resolution,
+            "min_value": self.min_value,
+            "max_value": self.max_value,
+            "avg_value": self.avg_value,
+            "first_value": self.first_value,
+            "last_value": self.last_value,
+            "reading_count": self.reading_count,
+            "quality_summary": self.quality_summary,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+

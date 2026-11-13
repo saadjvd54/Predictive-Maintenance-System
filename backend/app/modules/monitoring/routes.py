@@ -180,6 +180,10 @@ def get_historical_readings(machine_id: str):
         except ValueError:
             logger.warning(f"Invalid end_time format: {end_str}")
 
+    # Phase 3 Step 3.1: Support downsample policy, bucket_seconds, and window
+    downsample_arg = request.args.get("downsample", "auto")
+    bucket_seconds = request.args.get("bucket_seconds", type=int)
+
     readings = IngestionService.get_historical_readings(
         machine_id=machine_id,
         organization_id=g.current_org_id,
@@ -187,14 +191,151 @@ def get_historical_readings(machine_id: str):
         start_time=start_dt,
         end_time=end_dt,
         limit=limit,
+        downsample=downsample_arg,
+        bucket_seconds=bucket_seconds,
     )
 
     return jsonify({
         "machine_id": machine_id,
         "count": len(readings),
         "readings": readings,
+        "downsampled": bool(readings and readings[0].get("downsampled")),
         "simulator_flag": True,
     }), 200
+
+
+# ==============================================================================
+# PHASE 3 STEP 3.1: STORAGE MONITORING & RETENTION ENDPOINTS
+# ==============================================================================
+
+@monitoring_bp.route("/monitoring/storage/health", methods=["GET"])
+@login_required
+def get_storage_health():
+    """Retrieve telemetry storage volume, growth rates, and retention audit metrics."""
+    from app.modules.monitoring.storage_service import StorageMonitoringService
+    metrics = StorageMonitoringService.get_storage_metrics(g.current_org_id)
+    return jsonify(metrics), 200
+
+
+@monitoring_bp.route("/equipment/<machine_id>/retention/policy", methods=["GET"])
+@login_required
+def get_retention_policy(machine_id: str):
+    """Retrieve effective retention policy for a machine."""
+    machine = db.session.get(Machine, machine_id)
+    if not machine or machine.organization_id != g.current_org_id:
+        return jsonify({"error": "Not Found", "message": "Equipment not found or access denied."}), 404
+
+    from app.modules.monitoring.retention_service import RetentionService
+    policy = RetentionService.get_effective_policy(g.current_org_id, machine_id)
+    if not policy:
+        return jsonify({
+            "machine_id": machine_id,
+            "organization_id": g.current_org_id,
+            "policy": None,
+            "message": "No active retention policy configured. Telemetry records are preserved indefinitely.",
+        }), 200
+
+    return jsonify({
+        "machine_id": machine_id,
+        "organization_id": g.current_org_id,
+        "policy": policy.to_dict(),
+    }), 200
+
+
+@monitoring_bp.route("/equipment/<machine_id>/retention/policy", methods=["POST"])
+@login_required
+@roles_required(*MONITORING_MANAGE_ROLES)
+def set_retention_policy(machine_id: str):
+    """Configure or update the retention policy for a machine or organization."""
+    machine = db.session.get(Machine, machine_id)
+    if not machine or machine.organization_id != g.current_org_id:
+        return jsonify({"error": "Not Found", "message": "Equipment not found or access denied."}), 404
+
+    payload = request.get_json(silent=True) or {}
+    raw_retention_days = int(payload.get("raw_retention_days", 90))
+    aggregate_retention_days = int(payload.get("aggregate_retention_days", 365))
+    is_active = bool(payload.get("is_active", True))
+    archive_before_delete = bool(payload.get("archive_before_delete", True))
+    batch_size = int(payload.get("batch_size", 500))
+
+    user_id = g.current_user.id if hasattr(g, "current_user") and g.current_user else None
+
+    from app.modules.monitoring.retention_service import RetentionService
+    try:
+        policy = RetentionService.set_policy(
+            organization_id=g.current_org_id,
+            machine_id=machine_id,
+            raw_retention_days=raw_retention_days,
+            aggregate_retention_days=aggregate_retention_days,
+            is_active=is_active,
+            archive_before_delete=archive_before_delete,
+            batch_size=batch_size,
+            user_id=user_id,
+        )
+        return jsonify({
+            "message": "Retention policy saved successfully.",
+            "policy": policy.to_dict(),
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": "Bad Request", "message": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error saving retention policy: {e}")
+        return jsonify({"error": "Internal Error", "message": str(e)}), 500
+
+
+@monitoring_bp.route("/equipment/<machine_id>/retention/execute", methods=["POST"])
+@login_required
+@roles_required(*MONITORING_MANAGE_ROLES)
+def execute_retention_job(machine_id: str):
+    """Execute retention cycle (dry_run=True supported)."""
+    machine = db.session.get(Machine, machine_id)
+    if not machine or machine.organization_id != g.current_org_id:
+        return jsonify({"error": "Not Found", "message": "Equipment not found or access denied."}), 404
+
+    payload = request.get_json(silent=True) or {}
+    dry_run = bool(payload.get("dry_run", False))
+    batch_size = payload.get("batch_size")
+    if batch_size is not None:
+        batch_size = int(batch_size)
+    max_batches = payload.get("max_batches")
+    if max_batches is not None:
+        max_batches = int(max_batches)
+
+    executed_by = getattr(g.current_user, "email", "OPERATOR") if hasattr(g, "current_user") and g.current_user else "API"
+
+    from app.modules.monitoring.retention_service import RetentionService
+    try:
+        result = RetentionService.execute_retention(
+            organization_id=g.current_org_id,
+            machine_id=machine_id,
+            dry_run=dry_run,
+            batch_size=batch_size,
+            max_batches=max_batches,
+            executed_by=executed_by,
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        logger.error(f"Error executing retention job: {e}")
+        return jsonify({"error": "Execution Error", "message": str(e)}), 500
+
+
+@monitoring_bp.route("/equipment/<machine_id>/retention/history", methods=["GET"])
+@login_required
+def get_retention_history(machine_id: str):
+    """Retrieve retention execution audit history."""
+    machine = db.session.get(Machine, machine_id)
+    if not machine or machine.organization_id != g.current_org_id:
+        return jsonify({"error": "Not Found", "message": "Equipment not found or access denied."}), 404
+
+    from app.modules.monitoring.retention_service import RetentionService
+    limit = int(request.args.get("limit", 20))
+    history = RetentionService.get_execution_history(g.current_org_id, machine_id, limit=limit)
+    return jsonify({
+        "machine_id": machine_id,
+        "count": len(history),
+        "history": history,
+    }), 200
+
 
 
 # ==============================================================================
