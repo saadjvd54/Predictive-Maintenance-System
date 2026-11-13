@@ -1,17 +1,27 @@
 import os
-import joblib
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_auc_score,
-    average_precision_score,
-    confusion_matrix,
-)
+
+try:
+    import joblib
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import (
+        precision_score,
+        recall_score,
+        f1_score,
+        roc_auc_score,
+        average_precision_score,
+        confusion_matrix,
+    )
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    _SKLEARN_AVAILABLE = False
+    joblib = None
+    RandomForestClassifier = None
+    GradientBoostingClassifier = None
+    LogisticRegression = None
+
 from app.ml_engine.prediction.probability_calibrator import ProbabilityCalibrator
 
 
@@ -35,6 +45,11 @@ class FailureClassifierWrapper:
         self.is_calibrated: bool = False
 
     def _init_model(self) -> Any:
+        if not _SKLEARN_AVAILABLE:
+            raise ImportError(
+                "scikit-learn is required to instantiate and train failure classification models. "
+                "Install the offline model-training dependency profile (requirements-training.txt)."
+            )
         if self.algorithm == "GRADIENT_BOOSTING":
             return GradientBoostingClassifier(
                 n_estimators=self.hyperparameters.get("n_estimators", 100),
@@ -191,6 +206,11 @@ class FailureClassifierWrapper:
             "hyperparameters": self.hyperparameters,
             "is_calibrated": self.is_calibrated,
         }
+        if not _SKLEARN_AVAILABLE or joblib is None:
+            raise ImportError(
+                "joblib and scikit-learn are required to serialize failure classification models. "
+                "Install the offline model-training dependency profile (requirements-training.txt)."
+            )
         joblib.dump(payload, model_path)
 
         saved_cal_path = None
@@ -206,7 +226,11 @@ class FailureClassifierWrapper:
         """Loads serialized model artifact from disk."""
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model artifact not found at {model_path}")
-
+        if not _SKLEARN_AVAILABLE or joblib is None:
+            raise ImportError(
+                "joblib and scikit-learn are required to load failure classification models. "
+                "Install the offline model-training dependency profile (requirements-training.txt)."
+            )
         payload = joblib.load(model_path)
         wrapper = cls(
             algorithm=payload.get("algorithm", "RANDOM_FOREST"),

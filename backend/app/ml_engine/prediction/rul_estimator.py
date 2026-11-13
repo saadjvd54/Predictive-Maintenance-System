@@ -1,8 +1,15 @@
 import math
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
-from scipy.optimize import minimize
-from scipy.special import gamma
+
+try:
+    from scipy.optimize import minimize
+    from scipy.special import gamma
+    _SCIPY_AVAILABLE = True
+except ImportError:
+    _SCIPY_AVAILABLE = False
+    minimize = None
+    gamma = None
 
 
 class RULEstimateResult:
@@ -62,6 +69,12 @@ class WeibullSurvivalRUL:
         """
         if sum(events) < cls.MIN_FAILURE_EVENTS:
             return None
+
+        if not _SCIPY_AVAILABLE or minimize is None:
+            raise ImportError(
+                "scipy is required for Weibull MLE survival parameter fitting. "
+                "Please install the offline model-training dependency profile (requirements-training.txt)."
+            )
 
         t = np.array(durations, dtype=np.float64)
         c = np.array(events, dtype=np.float64)

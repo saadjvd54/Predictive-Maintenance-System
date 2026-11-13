@@ -1,8 +1,15 @@
 import os
-import joblib
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
-from sklearn.ensemble import IsolationForest
+
+try:
+    import joblib
+    from sklearn.ensemble import IsolationForest
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    _SKLEARN_AVAILABLE = False
+    joblib = None
+    IsolationForest = None
 
 
 class IsolationForestResult:
@@ -61,6 +68,12 @@ class IsolationForestWrapper:
         scaling_params: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Trains Isolation Forest on normal operational baseline feature matrix."""
+        if not _SKLEARN_AVAILABLE or IsolationForest is None:
+            raise ImportError(
+                "scikit-learn is required to train or fit Isolation Forest models. "
+                "Install the offline model-training dependency profile (requirements-training.txt)."
+            )
+
         if X is None or len(X) < 10:
             raise ValueError(f"Insufficient training data: {len(X) if X is not None else 0} samples. Minimum 10 required.")
 
@@ -186,6 +199,11 @@ class IsolationForestWrapper:
             "contamination": self.contamination,
             "n_estimators": self.n_estimators,
         }
+        if not _SKLEARN_AVAILABLE or joblib is None:
+            raise ImportError(
+                "joblib and scikit-learn are required to save Isolation Forest models. "
+                "Install the offline model-training dependency profile (requirements-training.txt)."
+            )
         joblib.dump(payload, filepath)
         return filepath
 
@@ -194,6 +212,11 @@ class IsolationForestWrapper:
         """Loads model and metadata from disk."""
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Model artifact not found at {filepath}")
+        if not _SKLEARN_AVAILABLE or joblib is None:
+            raise ImportError(
+                "joblib and scikit-learn are required to load Isolation Forest models. "
+                "Install the offline model-training dependency profile (requirements-training.txt)."
+            )
         payload = joblib.load(filepath)
         wrapper = cls(
             n_estimators=payload.get("n_estimators", 100),

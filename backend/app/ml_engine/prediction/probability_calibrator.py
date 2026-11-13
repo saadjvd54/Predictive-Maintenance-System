@@ -1,7 +1,15 @@
-from typing import Dict, Any, List, Tuple, Optional, Any
+from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
-from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-from sklearn.frozen import FrozenEstimator
+
+try:
+    from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+    from sklearn.frozen import FrozenEstimator
+    _SKLEARN_AVAILABLE = True
+except ImportError:
+    _SKLEARN_AVAILABLE = False
+    CalibratedClassifierCV = None
+    calibration_curve = None
+    FrozenEstimator = None
 
 
 class ProbabilityCalibrator:
@@ -53,8 +61,13 @@ class ProbabilityCalibrator:
         X_cal: np.ndarray,
         y_cal: np.ndarray,
         method: str = "sigmoid",  # 'sigmoid' for Platt scaling or 'isotonic'
-    ) -> CalibratedClassifierCV:
+    ) -> Any:
         """Fits probability calibrator over holdout calibration data."""
+        if not _SKLEARN_AVAILABLE or CalibratedClassifierCV is None:
+            raise ImportError(
+                "scikit-learn is required for probability calibration. "
+                "Install the offline model-training dependency profile (requirements-training.txt)."
+            )
         pos_count = int(np.sum(y_cal == 1))
         # Use FrozenEstimator for prefit estimators in scikit-learn 1.4+
         frozen = FrozenEstimator(base_estimator)

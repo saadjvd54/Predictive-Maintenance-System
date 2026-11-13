@@ -1,0 +1,11 @@
+# ==============================================================================
+# PharmaPredict AI — Offline Model-Training & Development Dependencies
+# Extends runtime requirements with scientific compute, ML training, & test tooling
+# ==============================================================================
+-r requirements.txt
+scipy>=1.13.0
+scikit-learn>=1.5.0
+joblib>=1.4.0
+gunicorn>=23.0.0
+pytest==9.2.0
+pytest-asyncio==1.4.1
