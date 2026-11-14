@@ -73,3 +73,9 @@ Saad_Javed_Claude_Work_Harness/
 
 # Scratch & Local Utilities
 scratch/
+
+# Secure Local Credentials (Never Commit)
+.credentials/
+*.credentials*
+.env.demo
+

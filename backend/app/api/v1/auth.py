@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, make_response, current_app, g
 from app.extensions import db
 from app.models.tenant import Organization, Site
-from app.models.user import User, Role, UserRoleAssignment
+from app.models.user import User, Role, UserRoleAssignment, UserSession
 from app.security import (
     create_user_session,
     revoke_user_session,
@@ -181,6 +181,55 @@ def get_current_user():
         "organization": org,
         "roles": roles,
         "permissions": permissions
+    }), 200
+
+
+@auth_bp.route("/change-password", methods=["POST"])
+@login_required
+def change_password():
+    """
+    Secure password rotation endpoint.
+    Validates current password, updates to strong new password,
+    revokes all active sessions for the user, and logs an audit event.
+    """
+    data = request.get_json(silent=True) or {}
+    current_password = data.get("current_password") or ""
+    new_password = data.get("new_password") or ""
+
+    if not current_password or not new_password:
+        return jsonify({
+            "error": "Bad Request",
+            "message": "Both current_password and new_password are required."
+        }), 400
+
+    user = g.current_user
+    if not user.check_password(current_password):
+        return jsonify({
+            "error": "Unauthorized",
+            "message": "Current password is incorrect."
+        }), 401
+
+    if len(new_password) < 12:
+        return jsonify({
+            "error": "Bad Request",
+            "message": "Password must be at least 12 characters long."
+        }), 400
+
+    user.set_password(new_password)
+
+    # Revoke all existing sessions for this user
+    UserSession.query.filter_by(user_id=user.id).update({"is_revoked": True})
+    db.session.commit()
+
+    log_audit_event(
+        action="password_rotated",
+        user_id=user.id,
+        organization_id=user.organization_id,
+        details={"status": "success"}
+    )
+
+    return jsonify({
+        "message": "Password updated successfully. All existing sessions have been revoked."
     }), 200
 
 
