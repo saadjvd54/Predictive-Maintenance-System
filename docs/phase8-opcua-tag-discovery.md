@@ -284,3 +284,4 @@ Before connecting this utility to a physical pharmaceutical PLC:
 5. [ ] **Run Discovery:** Execute `backend/gateway/tag_discovery.py` pointing to the PLC endpoint.
 6. [ ] **Inspect Output:** Review `discovered_nodes.json` and verify node paths and sampling rates.
 7. [ ] **Validate Signal Template:** Review `signal_mapping_template.json` with the site automation engineer, fill in `warning_min`/`warning_max` thresholds, and sign off before database registration.
+

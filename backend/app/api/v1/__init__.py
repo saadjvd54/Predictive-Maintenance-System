@@ -20,6 +20,7 @@ from app.modules.diagnostics import diagnostics_bp
 from app.modules.maintenance_recommendations import recommendations_bp
 from app.modules.knowledge import knowledge_bp
 from app.modules.pilots.routes import pilots_bp
+from app.modules.signal_mapping.commissioning_routes import commissioning_bp
 
 api_v1_bp = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 
@@ -46,3 +47,4 @@ api_v1_bp.register_blueprint(diagnostics_bp)
 api_v1_bp.register_blueprint(recommendations_bp)
 api_v1_bp.register_blueprint(knowledge_bp)
 api_v1_bp.register_blueprint(pilots_bp)
+api_v1_bp.register_blueprint(commissioning_bp)

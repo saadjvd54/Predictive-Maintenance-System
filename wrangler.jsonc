@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cold-wood-def2",
+  "compatibility_date": "2024-12-30",
+  "assets": {
+    "directory": "out"
+  }
+}
+

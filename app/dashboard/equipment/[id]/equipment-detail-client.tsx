@@ -43,6 +43,7 @@ import MonitoringTab from '@/components/equipment/monitoring-tab'
 import ConditionTab from '@/components/equipment/condition-tab'
 import PredictiveTab from '@/components/equipment/predictive-tab'
 import AiDiagnosticsTab from '@/components/equipment/ai-diagnostics-tab'
+import CommissioningReviewPanel from '@/components/equipment/commissioning-review-panel'
 import { DiscoveredTag } from '@/lib/api-client'
 
 export default function EquipmentDetailClient({ initialId }: { initialId?: string }) {
@@ -72,7 +73,7 @@ export default function EquipmentDetailClient({ initialId }: { initialId?: strin
     }
   }, [routeParams, initialId])
 
-  const [activeTab, setActiveTab] = useState<'components' | 'discovery' | 'signals' | 'monitoring' | 'condition' | 'predictive' | 'diagnostics'>('components')
+  const [activeTab, setActiveTab] = useState<'components' | 'discovery' | 'commissioning' | 'signals' | 'monitoring' | 'condition' | 'predictive' | 'diagnostics'>('components')
   const [initialTagForWizard, setInitialTagForWizard] = useState<DiscoveredTag | null>(null)
   const [showDirectWizard, setShowDirectWizard] = useState(false)
   const [machine, setMachine] = useState<EquipmentItem | null>(null)
@@ -660,6 +661,21 @@ export default function EquipmentDetailClient({ initialId }: { initialId?: strin
         </button>
 
         <button
+          onClick={() => setActiveTab('commissioning')}
+          className={`flex items-center gap-2 border-b-2 px-4 py-3 text-xs font-bold transition ${
+            activeTab === 'commissioning'
+              ? 'border-[#1685ff] text-[#1685ff]'
+              : 'border-transparent text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <ShieldCheck className="size-4" />
+          <span>Commissioning Review</span>
+          <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold text-indigo-800">
+            Phase 9
+          </span>
+        </button>
+
+        <button
           onClick={() => setActiveTab('signals')}
           className={`flex items-center gap-2 border-b-2 px-4 py-3 text-xs font-bold transition ${
             activeTab === 'signals'
@@ -765,6 +781,16 @@ export default function EquipmentDetailClient({ initialId }: { initialId?: strin
               setInitialTagForWizard(selectedTags[0])
               setShowDirectWizard(true)
             }
+            setActiveTab('commissioning')
+          }}
+        />
+      ) : activeTab === 'commissioning' ? (
+        <CommissioningReviewPanel
+          machineId={machine.id}
+          machineName={machine.equipment_name}
+          assetCode={machine.asset_code}
+          onActivationSuccess={() => {
+            fetchData(true)
             setActiveTab('signals')
           }}
         />

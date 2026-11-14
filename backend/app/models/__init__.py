@@ -102,6 +102,11 @@ from app.models.pilot import (
     PilotAgentEvaluation,
     PilotReport,
 )
+from app.models.commissioning import (
+    CommissioningStatus,
+    CommissioningSession,
+    DiscoveredSignalCandidate,
+)
 
 __all__ = [
     "Organization",
@@ -189,4 +194,7 @@ __all__ = [
     "PilotModelEvaluation",
     "PilotAgentEvaluation",
     "PilotReport",
+    "CommissioningStatus",
+    "CommissioningSession",
+    "DiscoveredSignalCandidate",
 ]

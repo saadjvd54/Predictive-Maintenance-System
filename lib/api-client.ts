@@ -2379,6 +2379,113 @@ class ApiClient {
       body: JSON.stringify({ report_type: reportType }),
     });
   }
+
+  // ==============================================================================
+  // COMMISSIONING WORKFLOW METHODS (PHASE 9)
+  // ==============================================================================
+
+  async importCommissioningDiscovery(
+    machineId: string,
+    payload: any,
+    sessionName?: string
+  ): Promise<ApiResponse<{ message: string; session: CommissioningSessionItem }>> {
+    const query = sessionName ? `?session_name=${encodeURIComponent(sessionName)}` : '';
+    return this.request(`/equipment/${machineId}/commissioning/import${query}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getCommissioningSessions(
+    machineId: string
+  ): Promise<ApiResponse<{ machine_id: string; count: number; sessions: CommissioningSessionItem[] }>> {
+    return this.request(`/equipment/${machineId}/commissioning/sessions`);
+  }
+
+  async getCommissioningSession(
+    sessionId: string,
+    includeCandidates: boolean = false
+  ): Promise<ApiResponse<{ session: CommissioningSessionItem }>> {
+    const query = includeCandidates ? '?include_candidates=true' : '';
+    return this.request(`/commissioning/sessions/${sessionId}${query}`);
+  }
+
+  async getSessionCandidates(
+    sessionId: string,
+    params?: {
+      category?: string;
+      confidence?: string;
+      status?: string;
+      is_mapped?: boolean;
+      search?: string;
+    }
+  ): Promise<ApiResponse<{ session_id: string; count: number; candidates: DiscoveredSignalCandidateItem[] }>> {
+    const q = new URLSearchParams();
+    if (params?.category) q.set('category', params.category);
+    if (params?.confidence) q.set('confidence', params.confidence);
+    if (params?.status) q.set('status', params.status);
+    if (params?.is_mapped !== undefined) q.set('is_mapped', String(params.is_mapped));
+    if (params?.search) q.set('search', params.search);
+    const qs = q.toString() ? `?${q.toString()}` : '';
+    return this.request(`/commissioning/sessions/${sessionId}/candidates${qs}`);
+  }
+
+  async getCandidateDetail(
+    candidateId: string
+  ): Promise<ApiResponse<{ candidate: DiscoveredSignalCandidateItem }>> {
+    return this.request(`/commissioning/candidates/${candidateId}`);
+  }
+
+  async updateCandidateMapping(
+    candidateId: string,
+    data: Partial<DiscoveredSignalCandidateItem>
+  ): Promise<ApiResponse<{ message: string; candidate: DiscoveredSignalCandidateItem }>> {
+    return this.request(`/commissioning/candidates/${candidateId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async reviewCandidate(
+    candidateId: string,
+    decision: 'APPROVED' | 'REJECTED',
+    reason?: string
+  ): Promise<ApiResponse<{ message: string; candidate: DiscoveredSignalCandidateItem }>> {
+    return this.request(`/commissioning/candidates/${candidateId}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ decision, reason }),
+    });
+  }
+
+  async bulkReviewCandidates(
+    sessionId: string,
+    candidateIds: string[],
+    decision: 'APPROVED' | 'REJECTED',
+    reason?: string
+  ): Promise<ApiResponse<{ message: string; result: any }>> {
+    return this.request(`/commissioning/sessions/${sessionId}/bulk-review`, {
+      method: 'POST',
+      body: JSON.stringify({ candidate_ids: candidateIds, decision, reason }),
+    });
+  }
+
+  async activateCommissioningSession(
+    sessionId: string
+  ): Promise<ApiResponse<{ message: string; activation: any }>> {
+    return this.request(`/commissioning/sessions/${sessionId}/activate`, {
+      method: 'POST',
+    });
+  }
+
+  async rollbackCommissioningSession(
+    sessionId: string,
+    reason?: string
+  ): Promise<ApiResponse<{ message: string; session: CommissioningSessionItem }>> {
+    return this.request(`/commissioning/sessions/${sessionId}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    });
+  }
 }
 
 // Phase 7 Type Definitions
@@ -2599,6 +2706,88 @@ export interface PilotReportItem {
   go_no_go_recommendation: string;
   limitations_and_disclaimers?: string;
   generated_at: string;
+}
+
+// Phase 9 Commissioning Types
+export interface CommissioningSessionItem {
+  id: string;
+  organization_id: string;
+  machine_id: string;
+  machine_name?: string;
+  asset_code?: string;
+  session_name: string;
+  source_endpoint_url?: string;
+  status: 'DISCOVERED' | 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'ACTIVATED' | 'CANCELLED';
+  discovered_nodes_count: number;
+  mapped_candidates_count: number;
+  unmapped_candidates_count: number;
+  approved_count: number;
+  rejected_count: number;
+  activated_count: number;
+  metadata: Record<string, any>;
+  audit_log: Array<{
+    timestamp: string;
+    user_id?: string;
+    action: string;
+    details?: string;
+  }>;
+  created_by?: string;
+  created_at?: string;
+  updated_at?: string;
+  activated_at?: string;
+  activated_by?: string;
+  candidates?: DiscoveredSignalCandidateItem[];
+}
+
+export interface DiscoveredSignalCandidateItem {
+  id: string;
+  session_id: string;
+  organization_id: string;
+  machine_id: string;
+  source_node_id: string;
+  browse_name?: string;
+  display_name?: string;
+  source_data_type?: string;
+  access_level?: string;
+  source_unit?: string;
+  suggested_category?: string;
+  confidence_level: 'HIGH' | 'MEDIUM' | 'LOW' | 'UNMAPPED';
+  confidence_score: number;
+  suggested_signal_code?: string;
+  target_signal_definition_id?: string;
+  signal_definition_code?: string;
+  signal_definition_name?: string;
+  custom_name?: string;
+  component_id?: string;
+  component_name?: string;
+  engineering_unit?: string;
+  scaling_factor: number;
+  offset: number;
+  sampling_interval_ms: number;
+  warning_min?: number | null;
+  warning_max?: number | null;
+  critical_min?: number | null;
+  critical_max?: number | null;
+  is_mapped: boolean;
+  status: 'DISCOVERED' | 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED' | 'ACTIVATED';
+  registered_machine_signal_id?: string | null;
+  review_history: Array<{
+    timestamp: string;
+    user_id?: string;
+    user_email?: string;
+    action?: string;
+    previous_status?: string;
+    new_status?: string;
+    decision?: string;
+    reason?: string;
+    previous_mapping?: Record<string, any>;
+    new_mapping?: Record<string, any>;
+  }>;
+  validation_errors: string[];
+  validation_warnings: string[];
+  is_valid: boolean;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export const apiClient = new ApiClient(API_BASE_URL);

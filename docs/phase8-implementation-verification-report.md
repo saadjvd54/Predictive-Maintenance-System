@@ -171,3 +171,4 @@ The discovery utility was run against the registered demo machine (`DEMO-BPK-200
 1. **Signal Mapping Review Interface:** Develop a secure administrative web UI or CLI import tool to ingest approved `signal_mapping_template.json` files directly into the Neon PostgreSQL `machine_signals` table.
 2. **Dynamic Ingestion Configuration:** Update `edge_gateway.py` to support dynamic loading of approved signal mappings from the database without requiring edge code redeployment.
 3. **Live Factory Pilot Commissioning:** Coordinate with plant engineering to schedule read-only site discovery against the pilot blister packaging line PLC.
+
