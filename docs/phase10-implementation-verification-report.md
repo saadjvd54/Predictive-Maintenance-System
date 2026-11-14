@@ -151,3 +151,4 @@ Before connecting the hardened gateway to a physical production line:
 3. Import the Edge Gateway client certificate (`client_cert.pem`) into the PLC trusted clients store.
 4. Export the PLC server certificate and place it into `/var/lib/pharmapredict/trusted_certs/`.
 5. Execute Phase 8 tag discovery on the live PLC, followed by Phase 9 human review and approval.
+

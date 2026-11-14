@@ -106,3 +106,4 @@ volumes:
 networks:
   ot_isolated_net:
     driver: bridge
+

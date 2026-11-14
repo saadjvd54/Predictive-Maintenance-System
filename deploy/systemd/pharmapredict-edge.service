@@ -67,3 +67,4 @@ SyslogIdentifier=pharmapredict-edge
 
 [Install]
 WantedBy=multi-user.target
+

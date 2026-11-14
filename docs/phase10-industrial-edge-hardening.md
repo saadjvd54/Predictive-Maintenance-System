@@ -131,3 +131,4 @@ The edge gateway maintains real-time health metrics in `/var/lib/pharmapredict/b
 The probe script `python gateway/healthcheck.py` evaluates these metrics and exits:
 - `0` for healthy or temporarily degraded (OPC UA reconnecting) states.
 - `1` for fatal errors (event loop stalled > 60s, expired certificate, process stopped).
+
