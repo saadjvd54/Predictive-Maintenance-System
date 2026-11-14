@@ -81,6 +81,7 @@ class MaintenanceRecommendationService:
 
         # Generate work order reference stub
         work_order_ref = f"WO-{rec.machine_id[:6]}-{rec.id[:6]}".upper()
+        rec.work_order_reference = work_order_ref
 
         # Record approval audit trail
         approval_log = RecommendationApproval(
