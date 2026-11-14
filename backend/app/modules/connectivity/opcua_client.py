@@ -1,11 +1,10 @@
 import os
 import asyncio
 import time
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from datetime import datetime, timezone
 import asyncua
 from asyncua import Client, ua
-from asyncua.crypto.security_policies import SecurityPolicyBasic256Sha256, SecurityPolicyAes128Sha256RsaOaep
 
 from app.modules.connectivity.models import (
     ConnectionState,
@@ -18,23 +17,30 @@ from app.modules.connectivity.models import (
     ReadOnlyError,
     AuthenticationError,
     UntrustedCertificateError,
+    ExpiredCertificateError,
+    SecurityConfigurationError,
     ConnectionTimeoutError,
     ServerShutdownError,
 )
 from app.modules.connectivity.interface import BaseConnector, StateListener
-from app.modules.connectivity.security import CertificateValidator, compute_cert_fingerprint
+from app.modules.connectivity.security import (
+    CertificateValidator,
+    CertificateManager,
+    compute_cert_fingerprint,
+    check_certificate_expiry,
+)
 
 
 class SecureOPCUAClient(BaseConnector):
     """Modular, asynchronous, read-only OPC UA client built on asyncua.
     
-    Adheres strictly to Phase 4, Step 4 industrial connectivity requirements:
-    - Modular async connect() and disconnect()
-    - Configurable endpoints and timeouts
-    - Secure authentication (Anonymous, UserName, Certificate)
-    - Certificate validation without auto-trusting unknown certificates
-    - Connection health monitoring
-    - Mandatory read-only enforcement
+    Hardened for Phase 10 industrial deployment:
+    - Secure OPC UA connections (Basic256Sha256, SignAndEncrypt)
+    - X.509 client certificate management and rotation
+    - Server certificate validation and expiration checks
+    - Fail-closed security validation (prohibiting plaintext downgrade)
+    - Connection health and latency monitoring
+    - Mandatory read-only enforcement (prohibiting all write/control calls)
     """
 
     def __init__(self, config: ConnectionConfig):
@@ -46,12 +52,14 @@ class SecureOPCUAClient(BaseConnector):
             trusted_fingerprints=config.trusted_cert_fingerprints,
             trusted_certs_dir=config.trusted_certs_dir,
             auto_trust_unknown=config.auto_trust_unknown,
+            enforce_expiry=True,
         )
         self._last_error: Optional[str] = None
         self._reconnect_attempts: int = 0
         self._last_heartbeat: Optional[datetime] = None
         self._latency_ms: Optional[float] = None
         self._lock: Optional[asyncio.Lock] = None
+        self._client_cert_info: Optional[Dict[str, Any]] = None
 
     def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:
@@ -102,7 +110,7 @@ class SecureOPCUAClient(BaseConnector):
             self._state_listeners.remove(listener)
 
     # =========================================================================
-    # ASYNC CONNECT & DISCONNECT (Requirements 3, 4, 5, 6, 9)
+    # ASYNC CONNECT & DISCONNECT
     # =========================================================================
 
     async def connect(self) -> bool:
@@ -114,33 +122,56 @@ class SecureOPCUAClient(BaseConnector):
             self.set_state(ConnectionState.CONNECTING)
 
             try:
-                # 1. Initialize asyncua Client with configurable timeout
+                # 1. Pre-connection Security Configuration Validation (Fail Closed)
+                if self.config.security_policy != SecurityPolicy.NONE:
+                    if self.config.security_mode == SecurityMode.NONE:
+                        raise SecurityConfigurationError(
+                            "Invalid security configuration: security_policy is enabled but security_mode is None. "
+                            "Refusing to connect without Sign or SignAndEncrypt."
+                        )
+
+                # 2. Initialize asyncua Client with configurable timeout
                 self._client = Client(
                     url=self.config.endpoint_url,
                     timeout=self.config.timeout_sec
                 )
 
-                # 2. Configure Security Policies and Certificates
+                # 3. Configure Security Policies and Client Certificates
                 if self.config.security_policy != SecurityPolicy.NONE:
                     client_cert = self.config.client_cert_path
                     client_key = self.config.client_key_path
                     if not client_cert or not client_key:
-                        from app.modules.connectivity.security import generate_self_signed_cert
                         import tempfile
                         temp_dir = os.path.join(tempfile.gettempdir(), "pharmapredict_client_certs")
-                        client_cert, client_key = generate_self_signed_cert(temp_dir, common_name="PharmaPredict-OPCUA-Client")
+                        client_cert, client_key = CertificateManager.ensure_client_certificate(
+                            temp_dir, common_name="PharmaPredict-OPCUA-Client"
+                        )
+                        self.config.client_cert_path = client_cert
+                        self.config.client_key_path = client_key
+
+                    # Validate client certificate expiration before connecting
+                    try:
+                        self._client_cert_info = check_certificate_expiry(client_cert)
+                        if self._client_cert_info["is_expired"]:
+                            raise ExpiredCertificateError(
+                                f"Client certificate '{client_cert}' is expired. Cannot establish secure connection."
+                            )
+                    except Exception as e:
+                        if isinstance(e, ExpiredCertificateError):
+                            raise
+                        pass
 
                     sec_string = f"{self.config.security_policy.value},{self.config.security_mode.value},{client_cert},{client_key}"
                     await self._client.set_security_string(sec_string)
 
-                # 3. Configure User Authentication Identity
+                # 4. Configure User Authentication Identity
                 if self.config.user_auth_type == UserAuthType.USERNAME:
                     if not self.config.username:
                         raise AuthenticationError("Username authentication selected but no username provided.")
                     self._client.set_user(self.config.username)
                     self._client.set_password(self.config.password or "")
 
-                # 4. Connect with timeout
+                # 5. Connect with timeout
                 try:
                     await asyncio.wait_for(
                         self._client.connect(),
@@ -151,7 +182,7 @@ class SecureOPCUAClient(BaseConnector):
                         f"Connection to OPC UA endpoint '{self.config.endpoint_url}' timed out after {self.config.timeout_sec}s."
                     )
 
-                # 5. Validate Server Certificate (Requirement 6: Do not automatically trust unknown certs)
+                # 6. Validate Server Certificate (strictly no auto-trust; verify expiration)
                 await self._validate_server_certificate()
 
                 # Connection successfully established!
@@ -160,7 +191,7 @@ class SecureOPCUAClient(BaseConnector):
                 self.set_state(ConnectionState.CONNECTED)
                 return True
 
-            except UntrustedCertificateError as e:
+            except (UntrustedCertificateError, ExpiredCertificateError, SecurityConfigurationError) as e:
                 await self._safe_cleanup()
                 self.set_state(ConnectionState.ERROR, str(e))
                 raise
@@ -197,7 +228,6 @@ class SecureOPCUAClient(BaseConnector):
         if not self._client:
             return
 
-        # Check if the connection established security with a server certificate
         server_cert = None
         try:
             if hasattr(self._client, "security_policy") and self._client.security_policy:
@@ -211,10 +241,16 @@ class SecureOPCUAClient(BaseConnector):
         except Exception:
             pass
 
-        # If security policy is active or a certificate was transmitted, validate against trust list
-        if self.config.security_policy != SecurityPolicy.NONE or self.config.trusted_cert_fingerprints:
-            if server_cert:
-                self._cert_validator.validate_certificate(server_cert)
+        # If secure communication was mandated but no server cert was provided, fail closed
+        if self.config.security_policy != SecurityPolicy.NONE:
+            if not server_cert:
+                raise SecurityConfigurationError(
+                    f"Security policy '{self.config.security_policy.value}' was mandated, but server "
+                    f"did not present an X.509 certificate. Rejecting plaintext downgrade."
+                )
+
+        if server_cert:
+            self._cert_validator.validate_certificate(server_cert)
 
     async def disconnect(self) -> None:
         """Gracefully disconnect from the OPC UA server and release network resources."""
@@ -233,17 +269,22 @@ class SecureOPCUAClient(BaseConnector):
                 self._client = None
 
     # =========================================================================
-    # HEALTH MONITORING (Requirement 7)
+    # HEALTH MONITORING
     # =========================================================================
 
     async def check_health(self) -> ConnectionHealth:
         """Execute a heartbeat check and return connection health metrics."""
+        days_rem = self._client_cert_info.get("days_remaining") if self._client_cert_info else None
+        expires_at = self._client_cert_info.get("valid_to_dt") if self._client_cert_info else None
+
         if self._state != ConnectionState.CONNECTED or not self._client:
             return ConnectionHealth(
                 state=self._state,
                 is_healthy=False,
                 error_message=self._last_error or "Client is not connected",
                 reconnect_attempts=self._reconnect_attempts,
+                cert_days_remaining=days_rem,
+                cert_expires_at=expires_at,
             )
 
         start = time.perf_counter()
@@ -268,6 +309,8 @@ class SecureOPCUAClient(BaseConnector):
                 last_heartbeat=self._last_heartbeat,
                 reconnect_attempts=self._reconnect_attempts,
                 server_time=server_time,
+                cert_days_remaining=days_rem,
+                cert_expires_at=expires_at,
             )
 
         except (ua.UaError, asyncio.TimeoutError, OSError) as e:
@@ -279,10 +322,12 @@ class SecureOPCUAClient(BaseConnector):
                 is_healthy=False,
                 error_message=err_msg,
                 reconnect_attempts=self._reconnect_attempts,
+                cert_days_remaining=days_rem,
+                cert_expires_at=expires_at,
             )
 
     # =========================================================================
-    # READ-ONLY OPERATIONS (Requirement 12)
+    # READ-ONLY OPERATIONS
     # =========================================================================
 
     async def read_value(self, node_id: str) -> Any:
@@ -310,7 +355,7 @@ class SecureOPCUAClient(BaseConnector):
         return results
 
     # =========================================================================
-    # MANDATORY WRITE PROHIBITION (Requirements 12 & Tests)
+    # MANDATORY WRITE PROHIBITION
     # =========================================================================
 
     async def write_value(self, node_id: str, value: Any) -> None:
@@ -330,4 +375,3 @@ class SecureOPCUAClient(BaseConnector):
         raise ReadOnlyError(
             "OPC UA write operations are strictly disallowed. PharmaPredict AI is read-only."
         )
-

@@ -290,3 +290,4 @@ def rollback_session(session_id: str):
     except Exception as e:
         logger.error(f"Error rolling back session: {e}")
         return jsonify({"error": "Internal Error", "message": str(e)}), 500
+

@@ -1,0 +1,69 @@
+# ==============================================================================
+# PharmaPredict AI — Industrial Edge Gateway Systemd Unit
+# ==============================================================================
+# Installed to: /etc/systemd/system/pharmapredict-edge.service
+# Suitable for industrial DIN-rail IPCs running Debian, Ubuntu Core, or RHEL.
+# Complies with IEC 62443 industrial endpoint hardening guidelines.
+# ==============================================================================
+
+[Unit]
+Description=PharmaPredict AI Industrial Edge Gateway Daemon
+Documentation=https://github.com/saadjvd54/Predictive-Maintenance-System/tree/main/docs
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+[Service]
+Type=simple
+User=edgeuser
+Group=edgegroup
+
+# Working directory and execution entrypoint
+WorkingDirectory=/opt/pharmapredict
+ExecStart=/opt/pharmapredict/venv/bin/python /opt/pharmapredict/gateway/edge_gateway.py
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Environment configuration
+EnvironmentFile=/etc/pharmapredict/edge.env
+Environment=PYTHONUNBUFFERED=1
+Environment=STRUCTURED_LOGS=true
+
+# Systemd Watchdog Integration
+WatchdogSec=60s
+Restart=always
+RestartSec=5s
+
+# Industrial Resource Quotas (IEC 62443 / Embedded IPC limits)
+MemoryMax=512M
+MemoryHigh=400M
+CPUQuota=100%
+TasksMax=128
+
+# Security & Sandboxing Hardening
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+NoNewPrivileges=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Persistent Filesystem Permissions
+ReadWritePaths=/var/lib/pharmapredict/buffer /var/lib/pharmapredict/certs /var/log/pharmapredict
+ReadOnlyPaths=/opt/pharmapredict /var/lib/pharmapredict/trusted_certs
+
+# Graceful termination
+TimeoutStopSec=30s
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Structured Journald Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pharmapredict-edge
+
+[Install]
+WantedBy=multi-user.target

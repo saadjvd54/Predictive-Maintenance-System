@@ -1,0 +1,60 @@
+# ==============================================================================
+# PharmaPredict AI — Industrial Edge Gateway Container Image
+# ==============================================================================
+# Hardened, minimal, non-root container for OT plant-floor / DIN-rail edge deployment.
+# Complies with IEC 62443-4-2 component security requirements and Purdue Model Level 2/3.
+# ==============================================================================
+
+FROM python:3.12-slim AS runtime
+
+# 1. Install minimal OS security certificates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Create unprivileged industrial service account (UID/GID 10001)
+RUN groupadd -g 10001 edgegroup && \
+    useradd -u 10001 -g edgegroup -s /sbin/nologin -d /opt/edge-gateway -m edgeuser
+
+WORKDIR /opt/edge-gateway
+
+# 3. Install Python dependencies
+COPY backend/requirements.txt /opt/edge-gateway/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 4. Copy backend and gateway code
+COPY backend/ /opt/edge-gateway/
+
+# 5. Create persistent runtime directories with restrictive permissions (0700)
+RUN mkdir -p /var/lib/pharmapredict/buffer \
+             /var/lib/pharmapredict/certs \
+             /var/lib/pharmapredict/trusted_certs && \
+    chown -R edgeuser:edgegroup /opt/edge-gateway \
+                                /var/lib/pharmapredict && \
+    chmod 700 /var/lib/pharmapredict/buffer \
+              /var/lib/pharmapredict/certs \
+              /var/lib/pharmapredict/trusted_certs
+
+# 6. Switch to unprivileged user
+USER edgeuser:edgegroup
+
+# 7. Persistent volumes for buffer and certificates
+VOLUME ["/var/lib/pharmapredict/buffer", "/var/lib/pharmapredict/certs", "/var/lib/pharmapredict/trusted_certs"]
+
+# 8. Environment configuration
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/edge-gateway \
+    BUFFER_DIR=/var/lib/pharmapredict/buffer \
+    OPCUA_CERT_PATH=/var/lib/pharmapredict/certs/client_cert.pem \
+    OPCUA_KEY_PATH=/var/lib/pharmapredict/certs/client_key.pem \
+    TRUSTED_CERTS_DIR=/var/lib/pharmapredict/trusted_certs \
+    STRUCTURED_LOGS=true
+
+# 9. Strictly outbound HTTPS: zero EXPOSE statements (no open listening ports)
+
+# 10. Healthcheck probe
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python", "gateway/healthcheck.py"]
+
+CMD ["python", "gateway/edge_gateway.py"]

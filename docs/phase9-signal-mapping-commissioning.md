@@ -240,3 +240,4 @@ The commissioning workflow was verified against the registered demo packaging ma
 5. **Execute Multi-Criteria Validation:** Ensure zero validation errors remain across all candidate tags.
 6. **Obtain Engineering Sign-off:** Bulk approve the verified signals with an audit comment documenting calibration dates and OEM schematic references.
 7. **Activate into Production:** Click **Activate Approved Signals**. Verify that `MachineSignal` records are active and begin streaming telemetry via Edge Gateway.
+

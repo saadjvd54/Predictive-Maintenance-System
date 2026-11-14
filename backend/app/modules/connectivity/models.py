@@ -54,6 +54,16 @@ class UntrustedCertificateError(OPCUAError):
     pass
 
 
+class ExpiredCertificateError(UntrustedCertificateError):
+    """Raised when an X.509 certificate has expired or is not yet valid."""
+    pass
+
+
+class SecurityConfigurationError(OPCUAError):
+    """Raised when security parameters are invalid or fail closed (e.g. plaintext downgrade attempt)."""
+    pass
+
+
 class ConnectionTimeoutError(OPCUAError):
     """Raised when connection attempt exceeds configured timeout."""
     pass
@@ -115,6 +125,8 @@ class ConnectionHealth:
     reconnect_attempts: int = 0
     error_message: Optional[str] = None
     server_time: Optional[datetime] = None
+    cert_days_remaining: Optional[int] = None
+    cert_expires_at: Optional[datetime] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -125,5 +137,7 @@ class ConnectionHealth:
             "reconnect_attempts": self.reconnect_attempts,
             "error_message": self.error_message,
             "server_time": self.server_time.isoformat() if self.server_time else None,
+            "cert_days_remaining": self.cert_days_remaining,
+            "cert_expires_at": self.cert_expires_at.isoformat() if self.cert_expires_at else None,
         }
 

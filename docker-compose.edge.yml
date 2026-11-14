@@ -1,0 +1,108 @@
+version: "3.8"
+
+# ==============================================================================
+# PharmaPredict AI — Industrial Edge Gateway Docker Compose Specification
+# ==============================================================================
+# Suitable for industrial DIN-rail PCs, IPCs (Siemens Microbox, Advantech, Beckhoff),
+# and edge appliances running Ubuntu Core / Debian / RHEL.
+# Complies with IEC 62443 defense-in-depth principles.
+# ==============================================================================
+
+services:
+  # ============================================================================
+  # Production Edge Gateway Daemon
+  # ============================================================================
+  edge-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.edge
+    container_name: pharmapredict-edge-gateway
+    restart: unless-stopped
+    user: "10001:10001"
+    
+    # Industrial Container Hardening
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    
+    # Resource Limits for Industrial Embedded PCs
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.2"
+          memory: 128M
+
+    environment:
+      - GATEWAY_ID=${GATEWAY_ID:-gw-edge-packaging-01}
+      - ORGANIZATION_ID=${ORGANIZATION_ID:-org-default}
+      - EQUIPMENT_ID=${EQUIPMENT_ID:-0d9bba98-6ad9-417c-9543-ef024447ef04}
+      - OPCUA_ENDPOINT_URL=${OPCUA_ENDPOINT_URL:-opc.tcp://192.168.1.100:4840/}
+      - OPCUA_SECURITY_POLICY=${OPCUA_SECURITY_POLICY:-Basic256Sha256}
+      - OPCUA_SECURITY_MODE=${OPCUA_SECURITY_MODE:-SignAndEncrypt}
+      - OPCUA_AUTH_TYPE=${OPCUA_AUTH_TYPE:-UserName}
+      - OPCUA_USERNAME=${OPCUA_USERNAME}
+      - OPCUA_PASSWORD=${OPCUA_PASSWORD}
+      - OPCUA_TIMEOUT_SEC=5.0
+      - CLOUD_INGESTION_URL=${CLOUD_INGESTION_URL:-https://predictive-maintenance-system-bay.vercel.app/api/v1/internal/ingestion/readings}
+      - GATEWAY_INTERNAL_SECRET=${GATEWAY_INTERNAL_SECRET:?Mandatory gateway secret required}
+      - GATEWAY_INTERNAL_SECRET_SECONDARY=${GATEWAY_INTERNAL_SECRET_SECONDARY:-}
+      - BUFFER_DIR=/var/lib/pharmapredict/buffer
+      - MAX_QUEUE_SIZE=5000
+      - MAX_DISK_BUFFER_BYTES=52428800
+      - BATCH_SIZE=50
+      - FLUSH_INTERVAL_SEC=1.0
+      - VERIFY_SSL=true
+      - IS_SIMULATOR=${IS_SIMULATOR:-false}
+      - STRUCTURED_LOGS=true
+      - LOG_LEVEL=INFO
+
+    volumes:
+      # Persistent storage volume ensuring disk buffer survives container restarts
+      - edge_buffer_data:/var/lib/pharmapredict/buffer
+      # Client X.509 certificate & key volume
+      - edge_certs_data:/var/lib/pharmapredict/certs
+      # Server X.509 trusted certificates directory
+      - edge_trusted_certs:/var/lib/pharmapredict/trusted_certs:ro
+
+    networks:
+      - ot_isolated_net
+
+  # ============================================================================
+  # Optional Local Staging OPC UA Simulator (For Edge Offline Testing Only)
+  # Activated via: docker compose -f docker-compose.edge.yml --profile testing up
+  # ============================================================================
+  opcua-simulator:
+    image: python:3.12-slim
+    container_name: pharmapredict-opcua-simulator
+    profiles:
+      - testing
+    restart: "no"
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+    command: >
+      python -c "
+      import asyncio;
+      from app.modules.connectivity.simulator import PharmaOPCUASimulator;
+      sim = PharmaOPCUASimulator(port=48401);
+      asyncio.run(sim.start());
+      asyncio.get_event_loop().run_forever()
+      "
+    networks:
+      - ot_isolated_net
+
+volumes:
+  edge_buffer_data:
+    driver: local
+  edge_certs_data:
+    driver: local
+  edge_trusted_certs:
+    driver: local
+
+networks:
+  ot_isolated_net:
+    driver: bridge

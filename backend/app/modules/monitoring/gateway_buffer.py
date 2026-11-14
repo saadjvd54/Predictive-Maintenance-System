@@ -105,14 +105,31 @@ class BoundedGatewayBuffer:
 
         util_pct = round((disk_bytes / self.max_disk_buffer_bytes) * 100.0, 2) if self.max_disk_buffer_bytes > 0 else 0.0
 
+        # Calculate oldest record age in RAM queue
+        oldest_age_sec = 0.0
+        if self._queue:
+            try:
+                first_item = self._queue[0]
+                if hasattr(first_item, "source_timestamp") and first_item.source_timestamp:
+                    ts_str = first_item.source_timestamp
+                    if ts_str.endswith("Z"):
+                        ts_str = ts_str[:-1] + "+00:00"
+                    item_dt = datetime.fromisoformat(ts_str)
+                    now_dt = datetime.now(timezone.utc)
+                    oldest_age_sec = max(0.0, round((now_dt - item_dt).total_seconds(), 2))
+            except Exception:
+                oldest_age_sec = 0.0
+
         return {
             "gateway_id": self.gateway_id,
             "queue_depth": len(self._queue),
             "max_queue_size": self.max_queue_size,
+            "queue_utilization_pct": round((len(self._queue) / self.max_queue_size) * 100.0, 2) if self.max_queue_size > 0 else 0.0,
             "buffered_readings": self._buffered_disk_count,
             "disk_usage_bytes": disk_bytes,
             "max_disk_buffer_bytes": self.max_disk_buffer_bytes,
             "disk_utilization_pct": util_pct,
+            "oldest_record_age_sec": oldest_age_sec,
             "dropped_readings": self._dropped_count,
             "quarantined_corrupt_records": self._quarantined_corrupt_count,
             "dropped_first_timestamp": self._dropped_first_timestamp,

@@ -2,8 +2,8 @@
 """
 PharmaPredict AI — Edge Gateway Process & Event-Loop Healthcheck
 ================================================================
-Monitors gateway liveness, event loop responsiveness, and subsystem states.
-Avoids restart loops during transient factory network drops (Fix 5).
+Monitors gateway liveness, event loop responsiveness, certificate validity,
+and subsystem states. Avoids restart loops during transient factory network drops.
 """
 
 import os
@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 MAX_HEARTBEAT_AGE_SEC = 60.0
+CERT_EXPIRY_WARNING_DAYS = 15
 
 
 def check_health() -> int:
@@ -61,10 +62,20 @@ def check_health() -> int:
         print("[Healthcheck Error] Gateway reports is_running=False.")
         return 1
 
-    # 3. Subsystem Health Diagnostics (Logged, but does not trigger restart loop on transient network drop)
+    # 3. Certificate Expiration Warnings
+    cert_days = data.get("client_cert_days_remaining")
+    if cert_days is not None:
+        if cert_days < 0:
+            print(f"[Healthcheck CRITICAL] Client certificate is EXPIRED ({abs(cert_days)} days ago)!")
+            return 1
+        elif cert_days <= CERT_EXPIRY_WARNING_DAYS:
+            print(f"[Healthcheck Warning] Client certificate expiring soon: {cert_days} days remaining.")
+
+    # 4. Subsystem Health Diagnostics
     opcua_connected = data.get("opcua_connected", False)
     opcua_state = data.get("opcua_state", "UNKNOWN")
     overflow_active = data.get("overflow_active", False)
+    queue_util = data.get("queue_utilization_pct", 0.0)
 
     if not opcua_connected:
         print(f"[Healthcheck Warning] Gateway running in DEGRADED mode: OPC UA disconnected ({opcua_state}). Retrying...")
@@ -72,11 +83,13 @@ def check_health() -> int:
     if overflow_active:
         print("[Healthcheck Warning] Gateway running with active DISK BUFFER OVERFLOW.")
 
+    if queue_util > 80.0:
+        print(f"[Healthcheck Warning] High queue depth: {queue_util:.1f}% capacity utilized.")
+
     # Gateway event loop is alive and actively cycling
-    print(f"[Healthcheck OK] Gateway '{data.get('gateway_id')}' responsive (age: {heartbeat_age:.1f}s).")
+    print(f"[Healthcheck OK] Gateway '{data.get('gateway_id')}' responsive (age: {heartbeat_age:.1f}s, uptime: {data.get('uptime_sec', 0)}s).")
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(check_health())
-
