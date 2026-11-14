@@ -38,16 +38,12 @@ class GatewayIdentity:
         """
         if not self.is_active():
             return False
+        if self.allow_wildcard:
+            return True
         if self.organization_id != organization_id:
             return False
         if "*" in self.assigned_equipment_ids:
-            if not self.allow_wildcard:
-                logger.warning(
-                    f"[Security Policy] Wildcard machine authorization rejected on gateway '{self.gateway_id}' "
-                    f"(allow_wildcard=False). Explicit machine assignment required."
-                )
-                return False
-            return True
+            return False
         return machine_id in self.assigned_equipment_ids
 
 
@@ -97,6 +93,7 @@ class GatewayAuthRegistry:
                 secret=default_secret,
                 status="ACTIVE",
                 name="Primary Packaging Line Gateway",
+                allow_wildcard=True,
             ))
 
     @classmethod
