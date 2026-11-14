@@ -107,9 +107,20 @@ class DataQualityService:
                 1
             )
 
+        # Determine overall quality state
+        if overall_bad_count > 0:
+            overall_state = QualityState.BAD
+        elif overall_missing_count > 0:
+            overall_state = QualityState.MISSING
+        elif overall_suspect_count > 0:
+            overall_state = QualityState.SUSPECT
+        else:
+            overall_state = QualityState.GOOD
+
         return {
             "machine_id": machine_id,
             "machine_name": machine.equipment_name,
+            "overall_state": overall_state,
             "quality_score_pct": quality_score,
             "total_signals": total_signals,
             "good_count": overall_good_count,
